@@ -1,0 +1,7 @@
+# Metrics to export
+prometheus:
+  - trades_per_hour
+  - strategy_returns
+  - api_request_duration
+  - websocket_connections
+  - database_query_duration

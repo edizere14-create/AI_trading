@@ -1,0 +1,13 @@
+kraken_config = BROKERS["kraken"]
+# Validate order meets min_order_value
+# Limit API calls to rate_limit
+# Format prices to precision decimal places
+
+# Kraken broker configuration
+api:
+  base_url: "https://api.kraken.com"
+  rate_limit: 15  # calls per second
+
+trading:
+  min_order_value: 10.0
+  precision: 8

@@ -1,0 +1,15 @@
+# AI model hyperparameters
+momentum_classifier:
+  layers: [64, 32]
+  dropout: 0.3
+  learning_rate: 0.001
+  batch_size: 32
+  
+trend_lstm:
+  lstm_units: [128, 64]
+  sequence_length: 60
+  dropout: 0.2
+  
+feature_engineering:
+  normalize: true
+  lookback_periods: [14, 20, 50]

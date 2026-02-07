@@ -1,0 +1,10 @@
+# Health check thresholds
+database:
+  max_query_time: 1000  # ms
+  
+external_apis:
+  coingecko_success_rate: 0.99
+  price_age_max: 300    # 5 minutes
+  
+ai_models:
+  prediction_latency_max: 500  # ms

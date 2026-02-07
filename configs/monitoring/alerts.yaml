@@ -1,0 +1,8 @@
+# Alert thresholds
+performance:
+  daily_return_threshold: 0.05     # Alert on >5% daily gain/loss
+  drawdown_threshold: 0.10         # Alert on >10% drawdown
+  
+system:
+  api_latency_threshold: 5000      # 5s API timeout
+  websocket_reconnect_threshold: 3 # Reconnect after 3 failed pings

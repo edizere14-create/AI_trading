@@ -1,0 +1,4 @@
+# Paper trading configuration
+slippage_pct: 0.001     # 0.1% simulated slippage
+commission_pct: 0.001   # 0.1% commission
+fill_probability: 0.95  # 95% fill rate

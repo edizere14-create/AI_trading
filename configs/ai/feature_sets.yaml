@@ -1,0 +1,18 @@
+# Technical indicator feature sets
+basic:
+  - rsi_14
+  - macd
+  - price_change_1h
+  - volume_change
+  
+advanced:
+  - rsi_14
+  - rsi_20
+  - macd
+  - bb_width
+  - atr
+  - volume_sma_ratio
+  - price_change_1h
+  - price_change_4h
+
+FEATURES = load_yaml_config("features.yaml")

@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+ai_trading.egg-info/PKG-INFO
+ai_trading.egg-info/SOURCES.txt
+ai_trading.egg-info/dependency_links.txt
+ai_trading.egg-info/requires.txt
+ai_trading.egg-info/top_level.txt
+app/__init__.py
+app/main.py
