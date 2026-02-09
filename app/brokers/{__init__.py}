@@ -1,0 +1,5 @@
+from app.brokers.paper_broker import PaperBroker
+
+paper_broker = PaperBroker()
+
+__all__ = ["paper_broker"]

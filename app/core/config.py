@@ -24,16 +24,30 @@ def load_strategies() -> Dict[str, Any]:
 def load_broker(broker_name: str) -> Dict[str, Any]:
     return load_config(f"configs/brokers/{broker_name}.yaml")
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "AI Trading API"
-    DATABASE_URL: str = "sqlite+aiosqlite:///./ai_trading.db"
-    REDIS_URL: str = "redis://localhost:6379"
-    JWT_SECRET: str = "super-secret-jwt-token-change-in-prod"
-    COINGECKO_API_KEY: str | None = None
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore"
+    )
     
-    class Config:
-        env_file = ".env"
+    # Required fields (loaded from .env)
+    DATABASE_URL: str = ""
+    JWT_SECRET: str = ""
+    KRAKEN_API_KEY: str = ""
+    KRAKEN_API_SECRET: str = ""
+    
+    # Optional fields with defaults
+    PROJECT_NAME: str = "AI Trading API"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRATION_MINUTES: int = 30
+    ENVIRONMENT: str = "development"
+    DEBUG: bool = False
+    LOG_LEVEL: str = "INFO"
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
+    TRADING_MODE: str = "paper"
+    REDIS_URL: str = "redis://localhost:6379/0"
 
 settings = Settings()

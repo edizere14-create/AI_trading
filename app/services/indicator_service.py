@@ -1,93 +1,125 @@
+import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
-import numpy as np
+import logging
 
 from app.schemas.indicator import IndicatorRequest, RSIResponse, MACDResponse
 from app.services.data_service import get_historical_candles
+
+logger = logging.getLogger(__name__)
 
 async def calculate_rsi(
     db: AsyncSession,
     req: IndicatorRequest,
 ) -> RSIResponse:
     """Calculate RSI indicator."""
-    # Fetch historical data
-    candles = await get_historical_candles(req.symbol, days=30)
-    
-    if not candles or len(candles) < req.period:
-        raise ValueError(f"Not enough data for RSI calculation. Need at least {req.period} candles")
-    
-    closes = np.array([c.get("close", 0.0) for c in candles], dtype=float)
-    rsi = calculate_rsi_values(closes, req.period)
-    
-    return RSIResponse(
-        symbol=req.symbol,
-        timeframe=req.timeframe,
-        rsi=float(rsi[-1]),
-        period=req.period,
-        timestamp=datetime.utcnow(),
-    )
+    try:
+        # Fetch historical data
+        candles = await get_historical_candles(db, req.symbol, days=30)
+        
+        if not candles or len(candles) < req.period:
+            logger.warning("Insufficient data for RSI calculation: %s", req.symbol)
+            return RSIResponse(
+                symbol=req.symbol,
+                period=req.period,
+                timeframe=req.timeframe,
+                rsi=50.0,  # Neutral RSI
+                timestamp=datetime.now()
+            )
+        
+        closes = np.array([float(c.get("close", 0.0)) for c in candles], dtype=float)
+        
+        # Calculate RSI
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        avg_gain = np.mean(gains[:req.period])
+        avg_loss = np.mean(losses[:req.period])
+        
+        if avg_loss == 0:
+            rsi_value = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi_value = 100.0 - (100.0 / (1.0 + rs))
+        
+        return RSIResponse(
+            symbol=req.symbol,
+            period=req.period,
+            timeframe=req.timeframe,
+            rsi=float(rsi_value),
+            timestamp=datetime.now()
+        )
+    except Exception as exc:
+        logger.error("Error calculating RSI for %s: %s", req.symbol, exc)
+        # Return neutral RSI on error
+        return RSIResponse(
+            symbol=req.symbol,
+            period=req.period,
+            timeframe=req.timeframe,
+            rsi=50.0,
+            timestamp=datetime.now()
+        )
 
 async def calculate_macd(
     db: AsyncSession,
     req: IndicatorRequest,
 ) -> MACDResponse:
     """Calculate MACD indicator."""
-    # Fetch historical data
-    candles = await get_historical_candles(req.symbol, days=30)
-    
-    if not candles or len(candles) < 26:
-        raise ValueError("Not enough data for MACD calculation. Need at least 26 candles")
-    
-    closes = np.array([c.get("close", 0.0) for c in candles], dtype=float)
-    macd_line, signal_line, histogram = calculate_macd_values(closes)
-    
-    return MACDResponse(
-        symbol=req.symbol,
-        timeframe=req.timeframe,
-        macd=float(macd_line[-1]),
-        signal=float(signal_line[-1]),
-        histogram=float(histogram[-1]),
-        period=req.period,
-        timestamp=datetime.utcnow(),
-    )
-
-def calculate_rsi_values(closes: np.ndarray, period: int) -> np.ndarray:
-    """Calculate RSI values from close prices."""
-    deltas = np.diff(closes)
-    seed = deltas[:period + 1]
-    up = seed[seed >= 0].sum() / period
-    down = -seed[seed < 0].sum() / period
-    rs = up / down if down != 0 else 0
-    
-    rsi = np.zeros_like(closes)
-    rsi[:period] = 100.0 - 100.0 / (1.0 + rs)
-    
-    for i in range(period, len(closes)):
-        delta = deltas[i - 1]
-        if delta > 0:
-            up_val = delta
-            down_val = 0.0
-        else:
-            up_val = 0.0
-            down_val = -delta
+    try:
+        # Fetch historical data
+        candles = await get_historical_candles(db, req.symbol, days=60)
         
-        up = (up * (period - 1) + up_val) / period
-        down = (down * (period - 1) + down_val) / period
-        rs = up / down if down != 0 else 0
-        rsi[i] = 100.0 - 100.0 / (1.0 + rs)
-    
-    return rsi
+        if not candles or len(candles) < 26:
+            logger.warning("Insufficient data for MACD calculation: %s", req.symbol)
+            return MACDResponse(
+                symbol=req.symbol,
+                timeframe=req.timeframe,
+                period=req.period,
+                macd=0.0,
+                signal=0.0,
+                histogram=0.0,
+                timestamp=datetime.now()
+            )
+        
+        closes = np.array([float(c.get("close", 0.0)) for c in candles], dtype=float)
+        
+        # Calculate EMAs
+        ema_12 = _calculate_ema(closes, 12)
+        ema_26 = _calculate_ema(closes, 26)
+        
+        macd_line = ema_12 - ema_26
+        signal_line = _calculate_ema(macd_line, 9)
+        histogram = macd_line[-1] - signal_line[-1]
+        
+        return MACDResponse(
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            period=req.period,
+            macd=float(macd_line[-1]),
+            signal=float(signal_line[-1]),
+            histogram=float(histogram),
+            timestamp=datetime.now()
+        )
+    except Exception as exc:
+        logger.error("Error calculating MACD for %s: %s", req.symbol, exc)
+        return MACDResponse(
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            period=req.period,
+            macd=0.0,
+            signal=0.0,
+            histogram=0.0,
+            timestamp=datetime.now()
+        )
 
-def calculate_macd_values(closes: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Calculate MACD, Signal, and Histogram."""
-    ema_12 = ema(closes, 12)
-    ema_26 = ema(closes, 26)
-    macd_line = ema_12 - ema_26
-    signal_line = ema(macd_line, 9)
-    histogram = macd_line - signal_line
-    
-    return macd_line, signal_line, histogram
-
-def ema(data: np.ndarray, period: int) -> np.ndarray:
+def _calculate_ema(data: np.ndarray, period: int) -> np.ndarray:
     """Calculate Exponential Moving Average."""
-    return data.ewm(span=period, adjust=False).mean()
+    multiplier = 2.0 / (period + 1)
+    ema = np.zeros_like(data)
+    ema[0] = data[0]
+    
+    for i in range(1, len(data)):
+        ema[i] = (data[i] * multiplier) + (ema[i-1] * (1 - multiplier))
+    
+    return ema

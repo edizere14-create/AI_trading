@@ -1,13 +1,16 @@
-from typing import Annotated, AsyncGenerator
+from typing import Annotated, AsyncGenerator, Generator
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.session import AsyncSessionLocal
+from app.db.session import SessionLocal, AsyncSessionLocal
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 from app.db.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -44,3 +47,14 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+def get_db() -> Generator[Session, None, None]:
+    """
+    Dependency function that provides a database session.
+    Ensures the session is closed after the request is completed.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

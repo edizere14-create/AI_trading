@@ -1,25 +1,14 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any, cast
+from fastapi import APIRouter
+from app.brokers.paper_trading import PaperTradingBroker
 
-from app.schemas.portfolio import PortfolioSummary, Position
-from app.services.portfolio_service import get_portfolio_summary, get_user_positions
-from app.utils.dependencies import get_db_dep, get_current_user
-from app.db.models.user import User
+router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
-router = APIRouter()
+# Initialize broker
+broker: PaperTradingBroker = PaperTradingBroker()
 
-@router.get("/", response_model=PortfolioSummary)
-async def get_portfolio(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_dep),
-) -> PortfolioSummary:
-    """Get user portfolio summary (equity, positions, PnL)."""
-    return await get_portfolio_summary(db, user.id)
-
-@router.get("/positions", response_model=list[Position])
-async def get_positions(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_dep),
-) -> list[Position]:
-    """Get all open positions."""
-    return await get_user_positions(db, user.id)
+@router.get("/")
+async def get_portfolio() -> Any:
+    """Get current portfolio with PnL."""
+    portfolio = await broker.get_portfolio()
+    return portfolio

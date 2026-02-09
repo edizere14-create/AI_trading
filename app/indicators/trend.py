@@ -1,8 +1,9 @@
 # Kraken data pipeline utility
 import aiohttp
 import datetime
+from typing import Optional, List, Dict, Any
 
-async def fetch_kraken_ohlcv(symbol: str, interval: int = 60, since: int = None, limit: int = 100):
+async def fetch_kraken_ohlcv(symbol: str, interval: int = 60, since: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:
 	"""
 	Fetch OHLCV data from Kraken public API.
 	symbol: Kraken pair (e.g., 'XXBTZUSD')

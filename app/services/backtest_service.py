@@ -1,11 +1,11 @@
 # Backtest service for running strategies on historical data
 from typing import Any
-from app.strategies.base import StrategyBase
+from app.strategies.base import BaseStrategy
 
 
 
 class BacktestService:
-	def __init__(self, strategy: StrategyBase, initial_balances: dict[str, float] | None = None):
+	def __init__(self, strategy: BaseStrategy, initial_balances: dict[str, float] | None = None):
 		self.strategy = strategy
 		self.initial_balances = initial_balances or {"USD": 10000.0}
 

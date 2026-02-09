@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 class StrategyRunRequest(BaseModel):
     strategy_code: str
@@ -8,13 +8,13 @@ class StrategyRunRequest(BaseModel):
     timeframe: str
     start: datetime
     end: datetime
-    initial_capital: float = 10_000
+    initial_capital: float = Field(default=10_000, gt=0)
 
 class Trade(BaseModel):
     timestamp: datetime
-    side: str
-    price: float
-    size: float
+    side: Literal["buy", "sell"]
+    price: float = Field(gt=0)
+    size: float = Field(gt=0)
 
 class StrategyRunResult(BaseModel):
     total_return: float
