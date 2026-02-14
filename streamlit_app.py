@@ -93,14 +93,25 @@ def connect_kraken(api_key: str, api_secret: str, env: str) -> tuple:
         balance = exchange.fetch_balance()
         server_time = exchange.fetch_time()
 
-        return exchange, balance, server_time, markets, None
+        # Log raw responses for debugging
+        import logging
+        logging.warning(f"Raw balance response: {balance}")
+        logging.warning(f"Raw server_time response: {server_time}")
+        logging.warning(f"Raw markets response: {markets}")
+
+        # Defensive: check types before accessing
+        if isinstance(balance, dict) and isinstance(server_time, (int, float, dict)) and isinstance(markets, dict):
+            return exchange, balance, server_time, markets, None
+        else:
+            return None, None, None, None, f"Unexpected response format: balance={type(balance)}, server_time={type(server_time)}, markets={type(markets)}"
 
     except ccxt.AuthenticationError as e:
         return None, None, None, None, f"Authentication failed: {str(e)}"
     except ccxt.NetworkError as e:
         return None, None, None, None, f"Network error: {str(e)}"
     except Exception as e:
-        return None, None, None, None, f"Error: {str(e)}"
+        import traceback
+        return None, None, None, None, f"Error: {str(e)}\nTraceback: {traceback.format_exc()}"
 
 
 if connect:
