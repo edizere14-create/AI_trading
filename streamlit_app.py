@@ -23,15 +23,29 @@ with st.sidebar:
         ["Spot", "Futures (Demo)"]
     )
 
+
+    # Dynamic label for key/secret
+    if kraken_env == "Futures (Demo)":
+        key_label = "Kraken Futures Public Key"
+        secret_label = "Kraken Futures Private Key"
+        key_help = "Futures demo public key (no withdrawals)"
+        secret_help = "Futures demo private key"
+    else:
+        key_label = "Kraken API Key"
+        secret_label = "Kraken API Secret"
+        key_help = "API key with trading enabled (NO withdrawals)"
+        secret_help = None
+
     api_key = st.text_input(
-        "Kraken API Key",
+        key_label,
         type="password",
-        help="API key with trading enabled (NO withdrawals)"
+        help=key_help
     )
 
     api_secret = st.text_input(
-        "Kraken API Secret",
-        type="password"
+        secret_label,
+        type="password",
+        help=secret_help
     )
 
     connect = st.button("🔌 Connect to Kraken")
