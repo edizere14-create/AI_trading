@@ -61,24 +61,24 @@ with st.sidebar:
 
 # Add support for Spot and Futures (Demo)
 @st.cache_resource
-def get_kraken_exchange(api_key: str, api_secret: str, env: str):
+def get_kraken_exchange(api_key: str, api_secret: str, env: str) -> ccxt.Exchange:
     """Create and return a Kraken Spot or Futures (Demo) exchange instance"""
     if env == "Futures (Demo)":
-        return ccxt.krakenfutures({
+        exchange: ccxt.Exchange = ccxt.krakenfutures({
             "apiKey": api_key,
             "secret": api_secret,
             "enableRateLimit": True,
             "timeout": 30000,
-            "test": True,  # Use demo environment
-            "urls": {"api": "https://demo-futures.kraken.com/api"},
+            "urls": {"api": {"public": "https://demo-futures.kraken.com/api"}},
         })
     else:
-        return ccxt.kraken({
+        exchange = ccxt.kraken({
             "apiKey": api_key,
             "secret": api_secret,
             "enableRateLimit": True,
             "timeout": 30000,
         })
+    return exchange
 
 
 def connect_kraken(api_key: str, api_secret: str, env: str) -> tuple:
