@@ -196,6 +196,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         content={"detail": "Internal Server Error", "path": request.url.path},
     )
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"message": "AI Trading API", "status": "running", "docs": "/docs"}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

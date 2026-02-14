@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.schemas.risk import TradeCheckRequest, TradeCheckResponse, RiskLimits
-from app.core.config import RISK_PROFILES
+from app.core.config import settings
 
 async def check_trade_risk(
     db: AsyncSession,
@@ -32,5 +32,5 @@ async def check_trade_risk(
 async def get_user_risk_limits(db: AsyncSession, user_id: int) -> RiskLimits:
     """Fetch user's risk preferences from config or database."""
     # TODO: fetch from database if user has custom limits
-    default_profile = RISK_PROFILES.get("default", {})
+    default_profile = settings.RISK_PROFILES.get("default", {})
     return RiskLimits(**default_profile)

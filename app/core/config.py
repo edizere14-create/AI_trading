@@ -47,7 +47,26 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "http://localhost:3000"
-    TRADING_MODE: str = "paper"
+    TRADING_MODE: str = "kraken"
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Risk profiles
+    RISK_PROFILES: Dict[str, Any] = {
+        "low": {
+            "max_position_size": 0.02,
+            "max_daily_loss": 0.01,
+            "max_leverage": 1.0
+        },
+        "medium": {
+            "max_position_size": 0.05,
+            "max_daily_loss": 0.02,
+            "max_leverage": 2.0
+        },
+        "high": {
+            "max_position_size": 0.10,
+            "max_daily_loss": 0.05,
+            "max_leverage": 5.0
+        }
+    }
 
 settings = Settings()
