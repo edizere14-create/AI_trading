@@ -607,8 +607,17 @@ with col3:
 with col4:
     sl_pct = st.number_input("Stop Loss %", min_value=0.01, max_value=50.0, value=2.0, step=0.01, format="%.2f", key="sl_pct")
 
-# Buffer
-sl_buffer = st.number_input("Buffer (%)", min_value=0.0, max_value=1.0, value=st.session_state.get("stop_buffer", 0.1)*100, step=0.01, format="%.2f", key="sl_buffer") / 100
+# Buffer (UI: percent, internal: fraction)
+buffer_percent = st.number_input(
+    "Buffer (%)",
+    min_value=0.0,
+    max_value=100.0,
+    value=st.session_state.get("stop_buffer", 0.1) * 100,
+    step=0.01,
+    format="%.2f",
+    key="sl_buffer"
+)
+sl_buffer = buffer_percent / 100  # Internal use as fraction
 
 # Portfolio/risk
 portfolio_value = st.session_state.get("portfolio_value", 0)
