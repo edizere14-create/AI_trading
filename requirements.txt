@@ -21,3 +21,4 @@ ruff
 aiohttp==3.9.1
 email-validator==2.1.0
 python-multipart==0.0.9
+ccxt
