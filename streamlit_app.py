@@ -70,6 +70,7 @@ def get_kraken_exchange(api_key: str, api_secret: str, env: str):
             "enableRateLimit": True,
             "timeout": 30000,
             "test": True,  # Use demo environment
+            "urls": {"api": "https://demo-futures.kraken.com/api"},
         })
     else:
         return ccxt.kraken({
