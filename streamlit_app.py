@@ -17,6 +17,12 @@ st.title("📈 AI Trading Dashboard — Kraken Live")
 with st.sidebar:
     st.header("🔐 Exchange Settings")
 
+    # Choose between Spot and Futures
+    kraken_env = st.selectbox(
+        "Kraken Environment",
+        ["Spot", "Futures (Demo)"]
+    )
+
     api_key = st.text_input(
         "Kraken API Key",
         type="password",
@@ -29,7 +35,7 @@ with st.sidebar:
     )
 
     connect = st.button("🔌 Connect to Kraken")
-    
+
     if "exchange" in st.session_state:
         if st.button("🔌 Disconnect"):
             for key in ["exchange", "balance", "server_time", "markets"]:
@@ -38,19 +44,31 @@ with st.sidebar:
             st.rerun()
 
 # ---------- CONNECTION ----------
-@st.cache_resource
-def get_kraken_exchange(api_key: str, api_secret: str) -> ccxt.kraken:
-    """Create and return a Kraken exchange instance"""
-    return ccxt.kraken({
-        "apiKey": api_key,
-        "secret": api_secret,
-        "enableRateLimit": True,
-        "timeout": 30000,
-    })
 
-def connect_kraken(api_key: str, api_secret: str) -> tuple:
+# Add support for Spot and Futures (Demo)
+@st.cache_resource
+def get_kraken_exchange(api_key: str, api_secret: str, env: str):
+    """Create and return a Kraken Spot or Futures (Demo) exchange instance"""
+    if env == "Futures (Demo)":
+        return ccxt.krakenfutures({
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "timeout": 30000,
+            "test": True,  # Use demo environment
+        })
+    else:
+        return ccxt.kraken({
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "timeout": 30000,
+        })
+
+
+def connect_kraken(api_key: str, api_secret: str, env: str) -> tuple:
     try:
-        exchange = get_kraken_exchange(api_key, api_secret)
+        exchange = get_kraken_exchange(api_key, api_secret, env)
         exchange.check_required_credentials()
 
         # Load markets for precision/limits
@@ -74,8 +92,8 @@ if connect:
     if not api_key or not api_secret:
         st.error("❌ Please enter both API key and secret")
     else:
-        with st.spinner("Connecting to Kraken..."):
-            exchange, balance, server_time, markets, error = connect_kraken(api_key, api_secret)
+        with st.spinner(f"Connecting to Kraken {kraken_env}..."):
+            exchange, balance, server_time, markets, error = connect_kraken(api_key, api_secret, kraken_env)
 
         if exchange:
             st.session_state["exchange"] = exchange
@@ -83,7 +101,7 @@ if connect:
             st.session_state["server_time"] = server_time
             st.session_state["markets"] = markets
             st.session_state["connected_at"] = datetime.now()
-            st.success("✅ Connected to Kraken successfully")
+            st.success(f"✅ Connected to Kraken {kraken_env} successfully")
             st.rerun()
         else:
             st.error(f"❌ Connection failed: {error}")
