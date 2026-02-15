@@ -87,8 +87,7 @@ if connect:
         exchange, balance, server_time, markets, error = connect_kraken(
             api_key,
             api_secret,
-            kraken_env,
-            sender_comp_id if kraken_env == "Futures (Demo)" else None
+            kraken_env
         )
 
         if exchange:
