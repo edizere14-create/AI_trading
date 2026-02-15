@@ -6,10 +6,11 @@ import time
 from typing import Any, Dict, Optional, Literal
 
 from engine.futures_adapter import connect_kraken
+from engine.execution_manager import ExecutionManager
+from engine.positions import PositionManager
+from engine.risk import RiskManager
 from engine.validation import validate_order_params
 from engine.execution import execute_order, place_stop_loss_order, place_take_profit_order
-from engine.risk import compute_risk_metrics
-from engine.positions import fetch_positions, get_position_for_symbol, validate_sl_tp_for_position, position_allows_tp_sl
 
 st.set_page_config(
     page_title="AI Trading Dashboard",
@@ -268,122 +269,114 @@ if "exchange" in st.session_state:
     
     with col1:
         if st.button("🚀 Place Order", type="primary", use_container_width=True):
-            if not order_symbol:
-                st.error("❌ Please select a symbol")
-            elif order_amount <= 0:
-                st.error("❌ Amount must be greater than 0")
-            elif order_type == "limit" and (not order_price or order_price <= 0):
-                st.error("❌ Limit orders require a valid price")
-            else:
-                with st.spinner("Placing order..."):
-                    result = execute_order(
-                        st.session_state["exchange"],
-                        st.session_state["markets"],
-                        order_symbol,
-                        order_side,
-                        order_type,
-                        order_amount,
-                        order_price
-                    )
+            execution_mgr: ExecutionManager = st.session_state["execution_mgr"]
+            result = execution_mgr.execute_order(
+                order_symbol,
+                order_side,
+                order_type,
+                order_amount,
+                order_price
+            )
                 
-                if result["success"]:
-                    st.success(f"✅ Main order placed successfully!")
-                    st.json({
-                        "Order ID": result["order_id"],
-                        "Symbol": result["symbol"],
-                        "Side": result["side"],
-                        "Type": result["type"],
-                        "Amount": result["amount"],
-                        "Price": result["price"],
-                        "Status": result["status"]
-                    })
+            if result["success"]:
+                st.success(f"✅ Main order placed successfully!")
+                st.json({
+                    "Order ID": result["order_id"],
+                    "Symbol": result["symbol"],
+                    "Side": result["side"],
+                    "Type": result["type"],
+                    "Amount": result["amount"],
+                    "Price": result["price"],
+                    "Status": result["status"]
+                })
+                
+                if "order_history" not in st.session_state:
+                    st.session_state["order_history"] = []
+                st.session_state["order_history"].append(result)
+                
+                # ---------- CHECK POSITIONS BEFORE SL/TP ----------
+                position_mgr: PositionManager = st.session_state["position_mgr"]
+                position_result = position_mgr.get_position_for_symbol(order_symbol)
+                
+                if position_result["success"] and position_result["has_position"]:
+                    position = position_result["position"]
+                    st.info(f"📍 Found open position: {position.get('side').upper()} {position.get('contracts')} contracts @ ${position.get('markPrice', 'N/A')}")
                     
-                    if "order_history" not in st.session_state:
-                        st.session_state["order_history"] = []
-                    st.session_state["order_history"].append(result)
-                    
-                    # ---------- CHECK POSITIONS BEFORE SL/TP ----------
-                    position_result = get_position_for_symbol(st.session_state["exchange"], order_symbol)
-                    
-                    if position_result["success"] and position_result["has_position"]:
-                        position = position_result["position"]
-                        st.info(f"📍 Found open position: {position.get('side').upper()} {position.get('contracts')} contracts @ ${position.get('markPrice', 'N/A')}")
+                    # Validate SL/TP against position
+                    if use_stop_loss and stop_loss_price:
+                        validation = validate_sl_tp_for_position(
+                            position,
+                            order_price,
+                            stop_loss_price,
+                            take_profit_price if use_take_profit else order_price,
+                            order_side
+                        )
                         
-                        # Validate SL/TP against position
-                        if use_stop_loss and stop_loss_price:
-                            validation = validate_sl_tp_for_position(
-                                position,
-                                order_price,
-                                stop_loss_price,
-                                take_profit_price if use_take_profit else order_price,
-                                order_side
-                            )
-                            
-                            if not validation["valid"]:
-                                st.error(f"❌ Stop Loss Validation Failed:")
-                                for err in validation["errors"]:
-                                    st.error(f"  • {err}")
-                            else:
-                                for warning in validation["warnings"]:
-                                    st.warning(f"⚠️ {warning}")
+                        if not validation["valid"]:
+                            st.error(f"❌ Stop Loss Validation Failed:")
+                            for err in validation["errors"]:
+                                st.error(f"  • {err}")
+                        else:
+                            for warning in validation["warnings"]:
+                                st.warning(f"⚠️ {warning}")
                         
-                        # Place stop loss
-                        if use_stop_loss and stop_loss_price:
-                            validation = validate_sl_tp_for_position(
-                                position,
-                                order_price,
-                                stop_loss_price,
-                                take_profit_price if use_take_profit else order_price,
-                                order_side
-                            )
-                            
-                            if validation["valid"]:
-                                with st.spinner("Placing stop loss..."):
-                                    sl_result = place_stop_loss_order(
-                                        st.session_state["exchange"],
-                                        st.session_state["markets"],
-                                        order_symbol,
-                                        order_side,
-                                        order_amount,
-                                        stop_loss_price
-                                    )
+                    # Place stop loss
+                    if use_stop_loss and stop_loss_price:
+                        validation = validate_sl_tp_for_position(
+                            position,
+                            order_price,
+                            stop_loss_price,
+                            take_profit_price if use_take_profit else order_price,
+                            order_side
+                        )
+                        
+                        if validation["valid"]:
+                            with st.spinner("Placing stop loss..."):
+                                sl_result = place_stop_loss_order(
+                                    st.session_state["exchange"],
+                                    st.session_state["markets"],
+                                    order_symbol,
+                                    order_side,
+                                    order_amount,
+                                    stop_loss_price
+                                )
                                 
-                                if sl_result["success"]:
-                                    st.success(f"✅ Stop loss placed at ${stop_loss_price:,.2f}")
-                                    st.session_state["order_history"].append(sl_result)
-                                else:
-                                    st.warning(f"⚠️ Stop loss failed: {sl_result['error']}")
+                            if sl_result["success"]:
+                                st.success(f"✅ Stop loss placed at ${stop_loss_price:,.2f}")
+                                st.session_state["order_history"].append(sl_result)
                             else:
-                                st.error(f"❌ Stop loss rejected: {validation['errors'][0]}")
+                                st.warning(f"⚠️ Stop loss failed: {sl_result['error']}")
+                        else:
+                            st.error(f"❌ Stop loss rejected: {validation['errors'][0]}")
                         
-                        # Place take profit
-                        if use_take_profit and take_profit_price and order_side and order_symbol:
-                            validation = validate_sl_tp_for_position(
-                                position,
-                                order_price,
-                                stop_loss_price if use_stop_loss else order_price,
-                                take_profit_price,
-                                order_side
-                            )
-                            
-                            if validation["valid"]:
-                                with st.spinner("Placing take profit..."):
-                                    tp_result = place_take_profit_order(
-                                        st.session_state["exchange"],
-                                        st.session_state["markets"],
-                                        order_symbol,
-                                        order_side,
-                                        order_amount,
-                                        take_profit_price
-                                    )
+                    # Place take profit
+                    if use_take_profit and take_profit_price and order_side and order_symbol:
+                        validation = validate_sl_tp_for_position(
+                            position,
+                            order_price,
+                            stop_loss_price if use_stop_loss else order_price,
+                            take_profit_price,
+                            order_side
+                        )
+                        
+                        if validation["valid"]:
+                            with st.spinner("Placing take profit..."):
+                                tp_result = place_take_profit_order(
+                                    st.session_state["exchange"],
+                                    st.session_state["markets"],
+                                    order_symbol,
+                                    order_side,
+                                    order_amount,
+                                    take_profit_price
+                                )
                                 
-                                if tp_result["success"]:
-                                    st.success(f"✅ Take profit placed at ${take_profit_price:,.2f}")
-                                    st.session_state["order_history"].append(tp_result)
-                                else:
-                                    st.warning(f"⚠️ Take profit failed: {tp_result['error']}")
+                            if tp_result["success"]:
+                                st.success(f"✅ Take profit placed at ${take_profit_price:,.2f}")
+                                st.session_state["order_history"].append(tp_result)
                             else:
-                                st.error(f"❌ Take profit rejected: {validation['errors'][0]}")
+                                st.warning(f"⚠️ Take profit failed: {tp_result['error']}")
+                        else:
+                            st.error(f"❌ Take profit rejected: {validation['errors'][0]}")
                     else:
                         st.warning(f"⚠️ No open position found for {order_symbol}. SL/TP may not be placed.")
                     
