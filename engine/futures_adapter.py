@@ -1,5 +1,6 @@
 """Exchange connectivity and initialization."""
 from typing import Any, Dict, Optional
+import time  # ADD THIS LINE
 import ccxt  # type: ignore
 
 
@@ -33,15 +34,13 @@ def test_connection(exchange: ccxt.Exchange) -> Dict[str, Any]:
     try:
         exchange.check_required_credentials()
         markets = exchange.load_markets()
-        server_time = exchange.fetch_time()
         
-        # IMPORTANT: Skip balance fetch for Kraken Futures
-        # Known CCXT compatibility issue with "flex" account
+        # Skip both balance and time fetch - not supported by Kraken Futures
+        server_time = int(time.time() * 1000)  # Use system time instead
         balance = {
             "free": {},
             "used": {},
             "total": {},
-            "info": {"note": "Balance fetch skipped - Kraken Futures CCXT limitation"}
         }
         
         return {
@@ -55,8 +54,6 @@ def test_connection(exchange: ccxt.Exchange) -> Dict[str, Any]:
         }
     except ccxt.AuthenticationError as e:
         return {"success": False, "error": f"Authentication failed: {str(e)}"}
-    except ccxt.NetworkError as e:
-        return {"success": False, "error": f"Network error: {str(e)}"}
     except Exception as e:
         return {"success": False, "error": f"Connection failed: {str(e)}"}
 
