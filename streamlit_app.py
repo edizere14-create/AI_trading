@@ -81,26 +81,28 @@ with st.sidebar:
 if connect:
     if not api_key or not api_secret:
         st.error("❌ Please enter both API key and secret")
-    elif kraken_env is None:
-        st.error("Environment not selected. Please choose 'Spot' or 'Futures (Demo)'.")
     else:
-        exchange, balance, server_time, markets, error = connect_kraken(
-            api_key,
-            api_secret,
-            kraken_env
-        )
-
-        if exchange:
-            st.session_state["exchange"] = exchange
-            st.session_state["balance"] = balance
-            st.session_state["server_time"] = server_time
-            st.session_state["markets"] = markets
-            st.session_state["symbols"] = exchange.symbols  # Store dynamic symbols
-            st.session_state["connected_at"] = datetime.now()
-            st.success(f"✅ Connected to Kraken {kraken_env} successfully")
-            st.rerun()
+        with st.spinner("Connecting to Kraken..."):
+            exchange, balance, server_time, markets, error = connect_kraken(
+                api_key,
+                api_secret,
+                kraken_env
+            )
+        
+        if error == "":
+            st.success("✅ Connected to Kraken!")
+            st.session_state.exchange = exchange
+            st.session_state.exchange_connected = True
         else:
-            st.error(f"❌ Connection failed: {error}")
+            st.error(f"❌ {error}")
+            st.session_state.exchange_connected = False
+
+# ADD THIS HERE - After connection logic:
+if st.session_state.get("exchange_connected", False):
+    exchange = st.session_state.get("exchange")
+    exchange_symbols = exchange.symbols if exchange else []
+else:
+    exchange_symbols = []
 
 # ---------- DASHBOARD ----------
 if "exchange" in st.session_state:
