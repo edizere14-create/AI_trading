@@ -11,7 +11,12 @@ def initialize_exchange(api_key: str, api_secret: str, env: str) -> ccxt.Exchang
             "secret": api_secret,
             "enableRateLimit": True,
             "timeout": 30000,
-            "urls": {"api": {"public": "https://demo-futures.kraken.com/api"}},
+            "urls": {
+                "api": {
+                    "public": "https://demo-futures.kraken.com/api",
+                    "private": "https://demo-futures.kraken.com/api"
+                }
+            }
         })
     else:
         exchange = ccxt.kraken({
@@ -41,7 +46,7 @@ def test_connection(exchange: ccxt.Exchange) -> Dict[str, Any]:
             "error": ""
         }
     except ccxt.AuthenticationError as e:
-        return {"success": False, "error": f"Authentication failed: {str(e)}"}
+        return {"success": False, "error": f"Authentication failed: Check API credentials. {str(e)}"}
     except ccxt.NetworkError as e:
         return {"success": False, "error": f"Network error: {str(e)}"}
     except Exception as e:
@@ -53,17 +58,23 @@ def connect_kraken(
     api_secret: str,
     env: str
 ) -> tuple[Optional[ccxt.Exchange], Optional[Dict[str, Any]], Optional[int | float | Dict[str, Any]], Optional[Dict[str, Any]], str]:
-    """Legacy function for backward compatibility."""
-    exchange = initialize_exchange(api_key, api_secret, env)
-    result = test_connection(exchange)
+    """Connect to Kraken REST API."""
+    if not api_key or not api_secret:
+        return None, None, None, None, "API key and secret are required"
     
-    if result["success"]:
-        return (
-            result["exchange"],
-            result["balance"],
-            result["server_time"],
-            result["markets"],
-            ""
-        )
-    else:
-        return None, None, None, None, result["error"]
+    try:
+        exchange = initialize_exchange(api_key, api_secret, env)
+        result = test_connection(exchange)
+        
+        if result["success"]:
+            return (
+                result["exchange"],
+                result["balance"],
+                result["server_time"],
+                result["markets"],
+                ""
+            )
+        else:
+            return None, None, None, None, result["error"]
+    except Exception as e:
+        return None, None, None, None, f"Unexpected error: {str(e)}"

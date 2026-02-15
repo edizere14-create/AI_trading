@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 from typing import Any, Dict, Optional, Literal
 
-from engine.futures_adapter import connect_kraken
+from engine.futures_adapter import connect_kraken, test_futures_credentials
 from engine.execution_manager import ExecutionManager
 from engine.positions import PositionManager
 from engine.risk import RiskManager
@@ -34,6 +34,13 @@ with st.sidebar:
         secret_label = "Kraken Futures Private Key"
         key_help = "Futures demo public key (no withdrawals)"
         secret_help = "Futures demo private key"
+        
+        # Add SenderCompID input
+        sender_comp_id = st.text_input(
+            "SenderCompID (Optional)",
+            help="If you have a FIX SenderCompID from Kraken, enter it here for enhanced authentication",
+            placeholder="e.g., YourCompanyID_DRV"
+        )
     else:
         key_label = "Kraken API Key"
         secret_label = "Kraken API Secret"
@@ -52,6 +59,23 @@ with st.sidebar:
                     del st.session_state[key]
             st.rerun()
 
+    # In the sidebar, after API Secret
+    if st.button("🧪 Test Credentials"):
+        if not api_key or not api_secret:
+            st.error("❌ Please enter both API key and secret")
+        else:
+            with st.spinner("Testing credentials..."):
+                test_result = test_futures_credentials(api_key, api_secret)
+            
+            if test_result["success"]:
+                st.success(test_result["message"])
+                st.json(test_result)
+            else:
+                st.error(f"❌ {test_result['error']}")
+                st.warning(f"💡 {test_result['help']}")
+                if "details" in test_result:
+                    st.code(test_result["details"])
+
 # ---------- CONNECTION ----------
 if connect:
     if not api_key or not api_secret:
@@ -62,7 +86,8 @@ if connect:
         exchange, balance, server_time, markets, error = connect_kraken(
             api_key,
             api_secret,
-            kraken_env
+            kraken_env,
+            sender_comp_id if kraken_env == "Futures (Demo)" else None
         )
 
         if exchange:
