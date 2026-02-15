@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 from typing import Any, Dict, Optional, Literal
 
-from engine.futures_adapter import connect_kraken
+from engine.futures_adapter import connect_kraken, test_connection
 from engine.execution_manager import ExecutionManager
 from engine.positions import PositionManager
 from engine.risk import RiskManager
