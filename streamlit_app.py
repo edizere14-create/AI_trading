@@ -119,34 +119,23 @@ if "exchange" in st.session_state:
     
     st.subheader("📊 Account Overview")
 
-    server_dt = datetime.fromtimestamp(st.session_state["server_time"] / 1000)
-    local_dt = datetime.now()
-    st.write(f"🕒 Kraken Server Time: **{server_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC**")
-    st.write(f"🕒 Local Time: **{local_dt.strftime('%Y-%m-%d %H:%M:%S')}**")
-
-    balances = st.session_state["balance"]["total"]
-    free_balances = st.session_state["balance"].get("free", {})
-    used_balances = st.session_state["balance"].get("used", {})
-    
-    df_balances = pd.DataFrame({
-        "Asset": balances.keys(),
-        "Total": balances.values(),
-        "Free": [free_balances.get(asset, 0) for asset in balances.keys()],
-        "Used": [used_balances.get(asset, 0) for asset in balances.keys()]
-    })
-    
-    df_balances = (
-        df_balances[df_balances["Total"] > 0]
-        .sort_values("Total", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    if not df_balances.empty:
-        st.dataframe(df_balances, use_container_width=True)
-        if "USDT" in balances and balances["USDT"] > 0:
-            st.metric("💰 USDT Balance", f"${balances['USDT']:,.2f}")
+    if st.session_state.exchange_connected:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            server_dt = datetime.fromtimestamp(st.session_state.server_time / 1000)
+            st.metric("Kraken Server Time", server_dt.strftime("%Y-%m-%d %H:%M:%S UTC"))
+        
+        with col2:
+            local_dt = datetime.now()
+            st.metric("Local Time", local_dt.strftime("%Y-%m-%d %H:%M:%S"))
+        
+        if st.session_state.balance:
+            st.info(f"Total Balance: {st.session_state.balance}")
+        else:
+            st.info("No balances found")
     else:
-        st.info("No balances found")
+        st.warning("⚠️ Not connected to Kraken")
 
     st.divider()
 
