@@ -12,13 +12,8 @@ def initialize_exchange(api_key: str, api_secret: str, env: str) -> ccxt.Exchang
             "secret": api_secret,
             "enableRateLimit": True,
             "timeout": 30000,
-            "urls": {
-                "api": {
-                    "public": "https://demo-futures.kraken.com/api",
-                    "private": "https://demo-futures.kraken.com/api"
-                }
-            }
         })
+        exchange.set_sandbox_mode(True)
     else:
         exchange = ccxt.kraken({
             "apiKey": api_key,
