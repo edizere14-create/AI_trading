@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 from typing import Any, Dict, Optional, Literal
 
-from engine.futures_adapter import connect_kraken, test_futures_credentials
+from engine.futures_adapter import connect_kraken
 from engine.execution_manager import ExecutionManager
 from engine.positions import PositionManager
 from engine.risk import RiskManager
@@ -60,21 +60,22 @@ with st.sidebar:
             st.rerun()
 
     # In the sidebar, after API Secret
-    if st.button("🧪 Test Credentials"):
-        if not api_key or not api_secret:
-            st.error("❌ Please enter both API key and secret")
-        else:
-            with st.spinner("Testing credentials..."):
-                test_result = test_futures_credentials(api_key, api_secret)
+    # if st.button("🧪 Test Credentials"):
+    #     from engine.futures_adapter import test_futures_credentials
+    #     if not api_key or not api_secret:
+    #         st.error("❌ Please enter both API key and secret")
+    #     else:
+    #         with st.spinner("Testing credentials..."):
+    #             test_result = test_futures_credentials(api_key, api_secret)
             
-            if test_result["success"]:
-                st.success(test_result["message"])
-                st.json(test_result)
-            else:
-                st.error(f"❌ {test_result['error']}")
-                st.warning(f"💡 {test_result['help']}")
-                if "details" in test_result:
-                    st.code(test_result["details"])
+    #             if test_result["success"]:
+    #                 st.success(test_result["message"])
+    #                 st.json(test_result)
+    #             else:
+    #                 st.error(f"❌ {test_result['error']}")
+    #                 st.warning(f"💡 {test_result['help']}")
+    #                 if "details" in test_result:
+    #                     st.code(test_result["details"])
 
 # ---------- CONNECTION ----------
 if connect:
