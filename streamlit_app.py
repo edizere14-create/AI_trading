@@ -120,6 +120,15 @@ if st.session_state.get("exchange_connected", False):
 else:
     exchange_symbols = []
 
+# Then in Place Order section:
+st.subheader("⚡ Place Order with Stop Loss & Take Profit")
+
+if exchange_symbols and len(exchange_symbols) > 0:
+    selected_symbol = st.selectbox("Symbol", exchange_symbols)
+else:
+    st.error("❌ No trading pairs available - Connect to Kraken first")
+    st.stop()
+
 # ---------- DASHBOARD ----------
 if "exchange" in st.session_state:
     connected_duration = datetime.now() - st.session_state.get("connected_at", datetime.now())
