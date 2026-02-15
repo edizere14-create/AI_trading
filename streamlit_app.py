@@ -1,10 +1,21 @@
 import streamlit as st
-import ccxt  # type: ignore
-import pandas as pd
 from datetime import datetime
-import time
-from typing import Any, Dict, Optional, Literal
+import sys
+sys.path.append(".")
 
+# INITIALIZE SESSION STATE FIRST - BEFORE EVERYTHING
+if "exchange" not in st.session_state:
+    st.session_state.exchange = None
+if "exchange_connected" not in st.session_state:
+    st.session_state.exchange_connected = False
+if "server_time" not in st.session_state:
+    st.session_state.server_time = None
+if "balance" not in st.session_state:
+    st.session_state.balance = None
+if "markets" not in st.session_state:
+    st.session_state.markets = None
+
+# NOW import other modules
 from engine.futures_adapter import connect_kraken, test_connection
 from engine.execution_manager import ExecutionManager
 from engine.positions import PositionManager
