@@ -59,7 +59,7 @@ class BacktestService:
 
 		# Max drawdown
 		peak = values[0] if values else self.initial_balances["USD"]
-		max_drawdown = 0
+		max_drawdown = 0.0
 		for v in values:
 			if v > peak:
 				peak = v

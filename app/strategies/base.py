@@ -1,43 +1,34 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Any
-from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from app.models.signals import TradingSignal
 
-from app.models.signals import SignalType, TradingSignal
 
 class BaseStrategy(ABC):
-    """Abstract base class for trading strategies."""
+    """Base class for all trading strategies."""
     
-    def __init__(self, symbol: str, name: str):
+    def __init__(self, symbol: str):
         self.symbol = symbol
-        self.name = name
     
     @abstractmethod
-    async def analyze(self, data: dict[str, Any]) -> Optional[TradingSignal]:
-        """Analyze market data and generate a trading signal."""
+    async def analyze(self, market_data: Dict[str, Any]) -> Optional[TradingSignal]:
+        """Analyze market data and generate trading signal.
+        
+        Args:
+            market_data: Dictionary containing market data (price, volume, etc.)
+            
+        Returns:
+            TradingSignal if conditions are met, None otherwise
+        """
         pass
     
-    def _create_signal(
-        self,
-        signal_type: SignalType,
-        price: float,
-        confidence: float,
-        reason: str = "",
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None
-    ) -> TradingSignal:
-        """Helper method to create a trading signal with UTC timestamp."""
-        if not 0 <= confidence <= 1:
-            raise ValueError("Confidence must be between 0 and 1")
-        if price <= 0:
-            raise ValueError("Price must be positive")
+    @abstractmethod
+    def generate_signals(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate trading signals based on historical data.
         
-        return TradingSignal(
-            signal=signal_type,
-            symbol=self.symbol,
-            timestamp=datetime.now(timezone.utc),
-            price=price,
-            confidence=confidence,
-            reason=reason,
-            stop_loss=stop_loss,
-            take_profit=take_profit
-        )
+        Args:
+            data: List of historical data dictionaries
+            
+        Returns:
+            Dictionary containing signal information (e.g., {'action': 'buy'/'sell'})
+        """
+        pass

@@ -1,6 +1,7 @@
 # FastAPI endpoint for placing live orders
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Dict, List
 
 from app.schemas.trade import PlaceOrderRequest, OrderResponse, OrderHistory
 from app.services.trade_service import place_order, get_user_orders
@@ -39,11 +40,11 @@ async def place_order_endpoint(
             detail="Failed to place order",
         )
 
-@router.get("/orders", response_model=list[OrderHistory])
+@router.get("/orders", response_model=List[OrderHistory])
 async def get_orders(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_dep),
-) -> list[OrderHistory]:
+) -> List[OrderHistory]:
     """Get user's order history."""
     try:
         if user is None or user.id is None:
@@ -59,7 +60,7 @@ async def get_orders(
         )
 
 @router.get("/health")
-async def trade_health_check() -> dict:
+async def trade_health_check() -> Dict[str, str]:
     """Health check for trading routes with error reporting."""
     try:
         return {
