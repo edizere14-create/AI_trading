@@ -200,12 +200,16 @@ if "exchange" in st.session_state:
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        order_symbol = st.selectbox(
-            "Symbol",
-            available_symbols,
-            index=0,
-            key="order_symbol"
-        )
+        selected_symbol = st.selectbox("Symbol", ["No options to select."] if not exchange_symbols else exchange_symbols)
+        
+        if selected_symbol and selected_symbol != "No options to select." and exchange_symbols:
+            try:
+                ticker = exchange.fetch_ticker(selected_symbol)
+                current_price = ticker['last']
+            except:
+                current_price = 0.0
+        else:
+            current_price = 0.0
     
     with col2:
         order_side = st.selectbox("Side", ["buy", "sell"])
@@ -216,7 +220,8 @@ if "exchange" in st.session_state:
     with col4:
         order_amount = st.number_input("Amount", min_value=0.0, step=0.001, format="%.6f")
     
-    order_price = None
+    order_price = current_price
+    
     if order_type == "limit":
         order_price = st.number_input(
             "Price",
@@ -228,8 +233,8 @@ if "exchange" in st.session_state:
     else:
         order_price = current_price
     
-    if order_symbol in st.session_state["markets"]:
-        market = st.session_state["markets"][order_symbol]
+    if selected_symbol in st.session_state["markets"]:
+        market = st.session_state["markets"][selected_symbol]
         st.caption(f"Min Amount: {market['limits']['amount']['min']} | Min Cost: ${market['limits']['cost']['min']}")
     
     st.divider()
