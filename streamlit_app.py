@@ -22,6 +22,7 @@ from engine.positions import PositionManager
 from engine.risk import RiskManager
 from engine.validation import validate_order_params
 from engine.execution import execute_order, place_stop_loss_order, place_take_profit_order
+import pandas as pd
 
 st.set_page_config(
     page_title="AI Trading Dashboard",
@@ -100,9 +101,13 @@ if connect:
                 kraken_env
             )
         
+        # ADD THIS SECTION:
         if error == "":
             st.success("✅ Connected to Kraken!")
             st.session_state.exchange = exchange
+            st.session_state.server_time = server_time
+            st.session_state.balance = balance
+            st.session_state.markets = markets
             st.session_state.exchange_connected = True
         else:
             st.error(f"❌ {error}")
@@ -130,7 +135,7 @@ if "exchange" in st.session_state:
     
     st.subheader("📊 Account Overview")
 
-    if st.session_state.exchange_connected:
+    if st.session_state.exchange_connected and st.session_state.server_time:
         col1, col2 = st.columns(2)
         
         with col1:
@@ -146,7 +151,7 @@ if "exchange" in st.session_state:
         else:
             st.info("No balances found")
     else:
-        st.warning("⚠️ Not connected to Kraken")
+        st.warning("⚠️ Not connected to Kraken or waiting for data...")
 
     st.divider()
 
