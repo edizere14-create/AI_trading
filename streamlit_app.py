@@ -28,6 +28,8 @@ from engine.risk import RiskManager
 from engine.validation import validate_order_params
 from engine.execution import execute_order, place_stop_loss_order, place_take_profit_order
 import pandas as pd
+import plotly.graph_objects as go
+from datetime import timedelta
 
 st.set_page_config(
     page_title="AI Trading Dashboard",
@@ -167,6 +169,32 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
                     base_asset = trading_pair.split('/')[0] if '/' in trading_pair else trading_pair.split(':')[0]
                     st.write(f"**24h Volume:** {ticker.get('baseVolume', 'N/A')} {base_asset}")
                     st.write(f"**Index Price:** ${ticker.get('indexPrice', 'N/A')}")
+                    
+                    # NEW: Fetch OHLCV candlestick data
+                    try:
+                        ohlcv = st.session_state["exchange"].fetch_ohlcv(trading_pair, timeframe='1h', limit=24)
+                        
+                        # Create candlestick chart
+                        fig = go.Figure(data=[go.Candlestick(
+                            x=[datetime.fromtimestamp(candle[0]/1000) for candle in ohlcv],
+                            open=[candle[1] for candle in ohlcv],
+                            high=[candle[2] for candle in ohlcv],
+                            low=[candle[3] for candle in ohlcv],
+                            close=[candle[4] for candle in ohlcv]
+                        )])
+                        
+                        fig.update_layout(
+                            title=f"{trading_pair} - 1H Chart",
+                            yaxis_title='Price (USD)',
+                            xaxis_title='Time',
+                            template='plotly_dark',
+                            height=500,
+                            xaxis_rangeslider_visible=False
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as chart_error:
+                        st.warning(f"⚠️ Chart data unavailable: {str(chart_error)}")
                 else:
                     st.warning("⚠️ No price data available")
             
