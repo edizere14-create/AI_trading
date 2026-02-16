@@ -184,21 +184,28 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
                 st.warning("⚠️ Invalid trading pair selected")
             else:
                 ticker = st.session_state["exchange"].fetch_ticker(trading_pair)
-                current_price = ticker.get('last', 0)
+                
+                # Kraken Futures: use markPrice from info, fallback to bid/ask
+                current_price = None
+                if ticker.get('info') and ticker['info'].get('markPrice'):
+                    current_price = float(ticker['info']['markPrice'])
+                elif ticker.get('bid'):
+                    current_price = float(ticker['bid'])
+                elif ticker.get('ask'):
+                    current_price = float(ticker['ask'])
+                else:
+                    current_price = 0
             
-                if current_price:
+                if current_price and current_price > 0:
                     col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Last Price", f"${current_price:,.2f}")
-                    col2.metric("24h High", f"${ticker.get('high', 0):,.2f}")
-                    col3.metric("24h Low", f"${ticker.get('low', 0):,.2f}")
-                    
-                    change_pct = ticker.get('percentage')
-                    if change_pct is not None:
-                        col4.metric("24h Change", f"{change_pct:.2f}%", delta=f"{change_pct:.2f}%")
+                    col1.metric("Mark Price", f"${current_price:.4f}")
+                    col2.metric("Bid", f"${ticker.get('bid', 0):.4f}")
+                    col3.metric("Ask", f"${ticker.get('ask', 0):.4f}")
+                    col4.metric("Spread", f"${(ticker.get('ask', 0) - ticker.get('bid', 0)):.4f}")
                     
                     base_asset = trading_pair.split('/')[0] if '/' in trading_pair else trading_pair.split(':')[0]
-                    st.write(f"**Volume (24h):** {ticker.get('baseVolume', 0):,.2f} {base_asset}")
-                    st.write(f"**Bid:** ${ticker.get('bid', 0):,.2f} | **Ask:** ${ticker.get('ask', 0):,.2f}")
+                    st.write(f"**24h Volume:** {ticker.get('baseVolume', 'N/A')} {base_asset}")
+                    st.write(f"**Index Price:** ${ticker.get('indexPrice', 'N/A')}")
                 else:
                     st.warning("⚠️ No price data available")
             
