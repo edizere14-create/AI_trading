@@ -238,7 +238,21 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
         order_type = st.selectbox("Type", ["market", "limit"])
     
     with col4:
-        order_amount = st.number_input("Amount", min_value=0.0, step=0.001, format="%.6f")
+        # Get minimum amount from market
+        min_amount = 1  # Default
+        if selected_symbol in st.session_state.get("markets", {}):
+            market = st.session_state["markets"][selected_symbol]
+            min_amt = market.get('limits', {}).get('amount', {}).get('min')
+            if min_amt is not None:
+                min_amount = min_amt
+        
+        order_amount = st.number_input(
+            "Amount",
+            min_value=float(min_amount),
+            step=float(min_amount),
+            format="%.1f",
+            value=float(min_amount)
+        )
     
     order_price = current_price
     
