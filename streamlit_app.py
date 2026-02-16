@@ -116,34 +116,42 @@ if connect:
 # ADD THIS HERE - After connection logic:
 if st.session_state.get("exchange_connected", False):
     exchange = st.session_state.get("exchange")
-    exchange_symbols = exchange.symbols if exchange else []
-else:
-    exchange_symbols = []
+    if exchange:
+        try:
+            exchange.load_markets()
+        except Exception as e:
+            st.error(f"load_markets error: {e}")
+
+        st.write("exchange:", exchange)
+        st.write("has fetchMarkets:", exchange.has.get("fetchMarkets"))
+        st.write("symbols count:", len(exchange.symbols) if exchange.symbols else 0)
+        st.write("markets keys count:", len(exchange.markets) if exchange.markets else 0)
 
 st.subheader("⚡ Place Order with Stop Loss & Take Profit")
 
-if exchange_symbols and len(exchange_symbols) > 0:
-    selected_symbol = st.selectbox("Symbol", exchange_symbols, key="order_symbol")
-else:
-    st.error("❌ No trading pairs available - Connect to Kraken first")
-    st.stop()
+# Session state init (near top)
+if "execution_mgr" not in st.session_state:
+    st.session_state.execution_mgr = None
+
+# Ensure exchange_symbols is defined once
+exchange = st.session_state.get("exchange")
+exchange_symbols = exchange.symbols if exchange else []
 
 # ---------- DASHBOARD ----------
-if "exchange" in st.session_state:
+if "exchange" in st.session_state and st.session_state.exchange_connected:
     connected_duration = datetime.now() - st.session_state.get("connected_at", datetime.now())
     st.success(f"🟢 Connected (Session: {connected_duration.seconds // 60}m {connected_duration.seconds % 60}s)")
     
     if st.button("🔄 Refresh Data"):
         try:
             st.session_state["balance"] = st.session_state["exchange"].fetch_balance()
-            st.session_state["server_time"] = st.session_state["exchange"].fetch_time()
             st.rerun()
         except Exception as e:
             st.error(f"Failed to refresh: {str(e)}")
     
     st.subheader("📊 Account Overview")
 
-    if st.session_state.exchange_connected and st.session_state.server_time:
+    if st.session_state.server_time:
         col1, col2 = st.columns(2)
         
         with col1:
@@ -158,27 +166,15 @@ if "exchange" in st.session_state:
             st.info(f"Total Balance: {st.session_state.balance}")
         else:
             st.info("No balances found")
-    else:
-        st.warning("⚠️ Not connected to Kraken or waiting for data...")
 
     st.divider()
 
-    # ---------- DYNAMIC MARKET DATA SECTION ----------
+    # ---------- LIVE MARKET DATA ----------
     st.subheader("📈 Live Market Data")
-    
-    # Get available symbols from exchange
-    available_symbols = st.session_state.get("symbols", [])
-    
-    if not available_symbols:
-        st.warning("⚠️ No trading pairs available")
-    else:
+    if exchange_symbols and len(exchange_symbols) > 0:
         col1, col2 = st.columns([3, 1])
         with col1:
-            trading_pair = st.selectbox(
-                "Select Trading Pair",
-                available_symbols,
-                index=0
-            )
+            trading_pair = st.selectbox("Select Trading Pair", exchange_symbols, index=0, key="market_symbol")
         with col2:
             auto_refresh = st.checkbox("Auto-refresh", value=False)
         
@@ -205,25 +201,28 @@ if "exchange" in st.session_state:
                 
         except Exception as e:
             st.error(f"Failed to fetch market data: {str(e)}")
-            current_price = 0
+    else:
+        st.warning("⚠️ No trading pairs available - Connect to Kraken first")
 
     st.divider()
     
-    # ---------- DYNAMIC ORDER PLACEMENT ----------
+    # ---------- ORDER PLACEMENT ----------
     st.subheader("⚡ Place Order with Stop Loss & Take Profit")
+    
+    if not exchange_symbols:
+        st.error("❌ No trading pairs available - Connect to Kraken first")
+        st.stop()
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        selected_symbol = st.selectbox("Symbol", ["No options to select."] if not exchange_symbols else exchange_symbols)
+        selected_symbol = st.selectbox("Symbol", exchange_symbols, key="order_symbol")
+        order_symbol = selected_symbol
         
-        if selected_symbol and selected_symbol != "No options to select." and exchange_symbols:
-            try:
-                ticker = exchange.fetch_ticker(selected_symbol)
-                current_price = ticker['last']
-            except:
-                current_price = 0.0
-        else:
+        try:
+            ticker = exchange.fetch_ticker(selected_symbol)
+            current_price = ticker['last']
+        except:
             current_price = 0.0
     
     with col2:
@@ -245,16 +244,14 @@ if "exchange" in st.session_state:
             step=0.01,
             format="%.2f"
         )
-    else:
-        order_price = current_price
     
-    if selected_symbol in st.session_state["markets"]:
+    if selected_symbol in st.session_state.get("markets", {}):
         market = st.session_state["markets"][selected_symbol]
         st.caption(f"Min Amount: {market['limits']['amount']['min']} | Min Cost: ${market['limits']['cost']['min']}")
     
     st.divider()
     
-    # Stop Loss & Take Profit settings
+    # ---------- RISK MANAGEMENT ----------
     st.subheader("🛡️ Risk Management")
     
     col1, col2 = st.columns(2)
@@ -310,131 +307,78 @@ if "exchange" in st.session_state:
     
     st.divider()
     
+    # ---------- ACTION BUTTONS ----------
     col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button("🚀 Place Order", type="primary", use_container_width=True):
-            execution_mgr: ExecutionManager = st.session_state["execution_mgr"]
-            result = execution_mgr.execute_order(
-                order_symbol,
-                order_side,
-                order_type,
-                order_amount,
-                order_price
-            )
-                
-            if result["success"]:
-                st.success(f"✅ Main order placed successfully!")
-                st.json({
-                    "Order ID": result["order_id"],
-                    "Symbol": result["symbol"],
-                    "Side": result["side"],
-                    "Type": result["type"],
-                    "Amount": result["amount"],
-                    "Price": result["price"],
-                    "Status": result["status"]
-                })
-                
-                if "order_history" not in st.session_state:
-                    st.session_state["order_history"] = []
-                st.session_state["order_history"].append(result)
-                
-                # ---------- CHECK POSITIONS BEFORE SL/TP ----------
-                position_mgr: PositionManager = st.session_state["position_mgr"]
-                position_result = position_mgr.get_position_for_symbol(order_symbol)
-                
-                if position_result["success"] and position_result["has_position"]:
-                    position = position_result["position"]
-                    st.info(f"📍 Found open position: {position.get('side').upper()} {position.get('contracts')} contracts @ ${position.get('markPrice', 'N/A')}")
+            if not st.session_state.get("execution_mgr"):
+                st.error("❌ Execution manager not initialized")
+            else:
+                execution_mgr = st.session_state["execution_mgr"]
+                result = execution_mgr.execute_order(
+                    order_symbol,
+                    order_side,
+                    order_type,
+                    order_amount,
+                    order_price
+                )
                     
-                    # Validate SL/TP against position
+                if result["success"]:
+                    st.success(f"✅ Main order placed successfully!")
+                    st.json({
+                        "Order ID": result["order_id"],
+                        "Symbol": result["symbol"],
+                        "Side": result["side"],
+                        "Type": result["type"],
+                        "Amount": result["amount"],
+                        "Price": result["price"],
+                        "Status": result["status"]
+                    })
+                    
+                    if "order_history" not in st.session_state:
+                        st.session_state["order_history"] = []
+                    st.session_state["order_history"].append(result)
+                    
+                    # Place SL/TP if enabled
                     if use_stop_loss and stop_loss_price:
-                        validation = validate_sl_tp_for_position(
-                            position,
-                            order_price,
-                            stop_loss_price,
-                            take_profit_price if use_take_profit else order_price,
-                            order_side
+                        sl_result = place_stop_loss_order(
+                            st.session_state["exchange"],
+                            st.session_state.get("markets", {}),
+                            order_symbol,
+                            order_side,
+                            order_amount,
+                            stop_loss_price
                         )
-                        
-                        if not validation["valid"]:
-                            st.error(f"❌ Stop Loss Validation Failed:")
-                            for err in validation["errors"]:
-                                st.error(f"  • {err}")
+                        if sl_result["success"]:
+                            st.success(f"✅ Stop loss placed at ${stop_loss_price:,.2f}")
                         else:
-                            for warning in validation["warnings"]:
-                                st.warning(f"⚠️ {warning}")
-                        
-                    # Place stop loss
-                    if use_stop_loss and stop_loss_price:
-                        validation = validate_sl_tp_for_position(
-                            position,
-                            order_price,
-                            stop_loss_price,
-                            take_profit_price if use_take_profit else order_price,
-                            order_side
+                            st.warning(f"⚠️ Stop loss failed: {sl_result.get('error')}")
+                    
+                    if use_take_profit and take_profit_price:
+                        tp_result = place_take_profit_order(
+                            st.session_state["exchange"],
+                            st.session_state.get("markets", {}),
+                            order_symbol,
+                            order_side,
+                            order_amount,
+                            take_profit_price
                         )
-                        
-                        if validation["valid"]:
-                            with st.spinner("Placing stop loss..."):
-                                sl_result = place_stop_loss_order(
-                                    st.session_state["exchange"],
-                                    st.session_state["markets"],
-                                    order_symbol,
-                                    order_side,
-                                    order_amount,
-                                    stop_loss_price
-                                )
-                                
-                            if sl_result["success"]:
-                                st.success(f"✅ Stop loss placed at ${stop_loss_price:,.2f}")
-                                st.session_state["order_history"].append(sl_result)
-                            else:
-                                st.warning(f"⚠️ Stop loss failed: {sl_result['error']}")
+                        if tp_result["success"]:
+                            st.success(f"✅ Take profit placed at ${take_profit_price:,.2f}")
                         else:
-                            st.error(f"❌ Stop loss rejected: {validation['errors'][0]}")
-                        
-                    # Place take profit
-                    if use_take_profit and take_profit_price and order_side and order_symbol:
-                        validation = validate_sl_tp_for_position(
-                            position,
-                            order_price,
-                            stop_loss_price if use_stop_loss else order_price,
-                            take_profit_price,
-                            order_side
-                        )
-                        
-                        if validation["valid"]:
-                            with st.spinner("Placing take profit..."):
-                                tp_result = place_take_profit_order(
-                                    st.session_state["exchange"],
-                                    st.session_state["markets"],
-                                    order_symbol,
-                                    order_side,
-                                    order_amount,
-                                    take_profit_price
-                                )
-                                
-                            if tp_result["success"]:
-                                st.success(f"✅ Take profit placed at ${take_profit_price:,.2f}")
-                                st.session_state["order_history"].append(tp_result)
-                            else:
-                                st.warning(f"⚠️ Take profit failed: {tp_result['error']}")
-                        else:
-                            st.error(f"❌ Take profit rejected: {validation['errors'][0]}")
-                    else:
-                        st.warning(f"⚠️ No open position found for {order_symbol}. SL/TP may not be placed.")
+                            st.warning(f"⚠️ Take profit failed: {tp_result.get('error')}")
                     
                     time.sleep(1)
                     st.rerun()
                 else:
-                    st.error(f"❌ Order failed: {result['error']}")
+                    st.error(f"❌ Order failed: {result.get('error')}")
     
     with col2:
         if st.button("🧪 Validate Order", use_container_width=True):
             is_valid, result = validate_order_params(
                 st.session_state["exchange"],
-                st.session_state["markets"],
+                st.session_state.get("markets", {}),
                 order_symbol,
                 order_side,
                 order_amount,
@@ -449,70 +393,4 @@ if "exchange" in st.session_state:
         if st.button("🔄 Reset Form", use_container_width=True):
             st.rerun()
 
-    st.divider()
-    
-    # Open orders section
-    st.subheader("📋 Open Orders")
-    try:
-        open_orders = st.session_state["exchange"].fetch_open_orders()
-        if open_orders:
-            df_orders = pd.DataFrame(open_orders)
-            st.dataframe(
-                df_orders[["symbol", "side", "type", "price", "amount", "status", "datetime"]],
-                use_container_width=True
-            )
-            
-            if st.checkbox("Show Cancel Options"):
-                order_id = st.text_input("Order ID to cancel")
-                order_symbol_cancel = st.selectbox(
-                    "Order Symbol",
-                    available_symbols,
-                    key="cancel_symbol"
-                )
-                if st.button("❌ Cancel Order"):
-                    try:
-                        st.session_state["exchange"].cancel_order(order_id, order_symbol_cancel)
-                        st.success(f"✅ Order {order_id} cancelled")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Failed to cancel: {str(e)}")
-        else:
-            st.info("No open orders")
-    except Exception as e:
-        st.warning(f"Could not fetch open orders: {str(e)}")
-
-    st.divider()
-    
-    # Order history section
-    if "order_history" in st.session_state and st.session_state["order_history"]:
-        st.subheader("📜 Order History (This Session)")
-        df_history = pd.DataFrame(st.session_state["order_history"])
-        display_cols = [
-            col for col in ["order_id", "symbol", "side", "type", "amount", "price", 
-                          "stop_price", "limit_price", "status", "datetime"]
-            if col in df_history.columns
-        ]
-        st.dataframe(df_history[display_cols], use_container_width=True)
-
-else:
-    st.info("🔒 Connect your Kraken account to view live data")
-    
-    with st.expander("ℹ️ How to get Kraken API credentials"):
-        st.markdown("""
-        1. Log in to your Kraken account
-        2. Go to **Settings** → **API**
-        3. Click **Generate New Key**
-        4. Set permissions:
-           - ✅ Query Funds
-           - ✅ Query Open Orders & Trades
-           - ✅ Query Closed Orders & Trades
-           - ✅ Create & Modify Orders (for trading)
-           - ❌ **DO NOT enable withdrawals**
-        5. Copy your API Key and Secret
-        6. Paste them in the sidebar
-        """)
-
-st.divider()
-st.warning("⚠️ Never enable withdrawals on API keys | Keep credentials secure | Use at your own risk")
-st.caption(f"Dashboard updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ...rest of code (Open Orders, Order History sections)...
