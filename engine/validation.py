@@ -20,14 +20,20 @@ def validate_order_params(
     """Validate order parameters against exchange limits."""
     try:
         _ = normalize_side(side)
-        market = markets[symbol]
+        market = markets.get(symbol, {})
 
-        min_amount = market["limits"]["amount"]["min"]
-        max_amount = market["limits"]["amount"]["max"]
-        min_cost = market["limits"]["cost"]["min"]
+        limits = market.get("limits", {})
+        min_amount = limits.get("amount", {}).get("min")
+        min_cost = limits.get("cost", {}).get("min")
 
         amount_str = exchange.amount_to_precision(symbol, amount)
         amount = float(amount_str) if amount_str is not None else amount
+
+        if min_amount is not None and amount < min_amount:
+            return False, f"Amount {amount} is below minimum {min_amount}"
+
+        if min_cost is not None and price is not None and amount * price < min_cost:
+            return False, f"Cost {amount * price} is below minimum {min_cost}"
 
         if amount < min_amount:
             return False, f"Amount too small. Minimum: {min_amount}"
