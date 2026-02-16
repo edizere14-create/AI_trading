@@ -1,5 +1,6 @@
 import streamlit as st
 from datetime import datetime
+import time
 import sys
 sys.path.append(".")
 
@@ -14,6 +15,10 @@ if "balance" not in st.session_state:
     st.session_state.balance = None
 if "markets" not in st.session_state:
     st.session_state.markets = None
+if "execution_mgr" not in st.session_state:
+    st.session_state.execution_mgr = None
+if "connected_at" not in st.session_state:
+    st.session_state.connected_at = None
 
 # NOW import other modules
 from engine.futures_adapter import connect_kraken, test_connection
@@ -46,13 +51,6 @@ with st.sidebar:
         secret_label = "Kraken Futures Private Key"
         key_help = "Futures demo public key (no withdrawals)"
         secret_help = "Futures demo private key"
-        
-        # Add SenderCompID input
-        sender_comp_id = st.text_input(
-            "SenderCompID (Optional)",
-            help="If you have a FIX SenderCompID from Kraken, enter it here for enhanced authentication",
-            placeholder="e.g., YourCompanyID_DRV"
-        )
     else:
         key_label = "Kraken API Key"
         secret_label = "Kraken API Secret"
@@ -66,28 +64,11 @@ with st.sidebar:
 
     if "exchange" in st.session_state:
         if st.button("🔌 Disconnect"):
-            for key in ["exchange", "balance", "server_time", "markets", "symbols"]:
+            for key in ["exchange", "balance", "server_time", "markets", "symbols", "connected_at"]:
                 if key in st.session_state:
                     del st.session_state[key]
+            st.session_state.exchange_connected = False
             st.rerun()
-
-    # In the sidebar, after API Secret
-    # if st.button("🧪 Test Credentials"):
-    #     from engine.futures_adapter import test_futures_credentials
-    #     if not api_key or not api_secret:
-    #         st.error("❌ Please enter both API key and secret")
-    #     else:
-    #         with st.spinner("Testing credentials..."):
-    #             test_result = test_futures_credentials(api_key, api_secret)
-            
-    #             if test_result["success"]:
-    #                 st.success(test_result["message"])
-    #                 st.json(test_result)
-    #             else:
-    #                 st.error(f"❌ {test_result['error']}")
-    #                 st.warning(f"💡 {test_result['help']}")
-    #                 if "details" in test_result:
-    #                     st.code(test_result["details"])
 
 # ---------- CONNECTION ----------
 if connect:
@@ -101,7 +82,6 @@ if connect:
                 kraken_env
             )
         
-        # ADD THIS SECTION:
         if error == "":
             st.success("✅ Connected to Kraken!")
             st.session_state.exchange = exchange
@@ -109,31 +89,13 @@ if connect:
             st.session_state.balance = balance
             st.session_state.markets = markets
             st.session_state.exchange_connected = True
+            st.session_state.connected_at = datetime.now()
+            st.rerun()
         else:
             st.error(f"❌ {error}")
             st.session_state.exchange_connected = False
 
-# ADD THIS HERE - After connection logic:
-if st.session_state.get("exchange_connected", False):
-    exchange = st.session_state.get("exchange")
-    if exchange:
-        try:
-            exchange.load_markets()
-        except Exception as e:
-            st.error(f"load_markets error: {e}")
-
-        st.write("exchange:", exchange)
-        st.write("has fetchMarkets:", exchange.has.get("fetchMarkets"))
-        st.write("symbols count:", len(exchange.symbols) if exchange.symbols else 0)
-        st.write("markets keys count:", len(exchange.markets) if exchange.markets else 0)
-
-st.subheader("⚡ Place Order with Stop Loss & Take Profit")
-
-# Session state init (near top)
-if "execution_mgr" not in st.session_state:
-    st.session_state.execution_mgr = None
-
-# Ensure exchange_symbols is defined once
+# Ensure exchange_symbols is defined
 exchange = st.session_state.get("exchange")
 exchange_symbols = exchange.symbols if exchange else []
 
@@ -179,7 +141,6 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
             auto_refresh = st.checkbox("Auto-refresh", value=False)
         
         try:
-            # Ensure trading_pair is valid
             if not trading_pair or trading_pair == "None":
                 st.warning("⚠️ Invalid trading pair selected")
             else:
@@ -220,4 +181,4 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
 
     st.divider()
 
-# ...existing code...
+st.subheader("⚡ Place Order with Stop Loss & Take Profit")
