@@ -179,30 +179,37 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
             auto_refresh = st.checkbox("Auto-refresh", value=False)
         
         try:
-            ticker = st.session_state["exchange"].fetch_ticker(trading_pair)
-            current_price = ticker['last']
+            # Ensure trading_pair is valid
+            if not trading_pair or trading_pair == "None":
+                st.warning("⚠️ Invalid trading pair selected")
+            else:
+                ticker = st.session_state["exchange"].fetch_ticker(trading_pair)
+                current_price = ticker.get('last', 0)
             
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Last Price", f"${current_price:,.2f}")
-            col2.metric("24h High", f"${ticker['high']:,.2f}")
-            col3.metric("24h Low", f"${ticker['low']:,.2f}")
+                if current_price:
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Last Price", f"${current_price:,.2f}")
+                    col2.metric("24h High", f"${ticker.get('high', 0):,.2f}")
+                    col3.metric("24h Low", f"${ticker.get('low', 0):,.2f}")
+                    
+                    change_pct = ticker.get('percentage')
+                    if change_pct is not None:
+                        col4.metric("24h Change", f"{change_pct:.2f}%", delta=f"{change_pct:.2f}%")
+                    
+                    base_asset = trading_pair.split('/')[0] if '/' in trading_pair else trading_pair.split(':')[0]
+                    st.write(f"**Volume (24h):** {ticker.get('baseVolume', 0):,.2f} {base_asset}")
+                    st.write(f"**Bid:** ${ticker.get('bid', 0):,.2f} | **Ask:** ${ticker.get('ask', 0):,.2f}")
+                else:
+                    st.warning("⚠️ No price data available")
+        
+        if auto_refresh:
+            time.sleep(5)
+            st.rerun()
             
-            change_pct = ticker.get('percentage')
-            if change_pct is not None:
-                col4.metric("24h Change", f"{change_pct:.2f}%", delta=f"{change_pct:.2f}%")
-            
-            base_asset = trading_pair.split('/')[0] if trading_pair else "?"
-            st.write(f"**Volume (24h):** {ticker.get('baseVolume', 0):,.2f} {base_asset}")
-            st.write(f"**Bid:** ${ticker.get('bid', 0):,.2f} | **Ask:** ${ticker.get('ask', 0):,.2f}")
-            
-            if auto_refresh:
-                time.sleep(5)
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Failed to fetch market data: {str(e)}")
-    else:
-        st.warning("⚠️ No trading pairs available - Connect to Kraken first")
+    except Exception as e:
+        st.error(f"Failed to fetch market data: {str(e)}")
+else:
+    st.warning("⚠️ No trading pairs available - Connect to Kraken first")
 
     st.divider()
     
