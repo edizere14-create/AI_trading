@@ -316,11 +316,19 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
         order_price = st.number_input(
             "Price",
             min_value=0.0,
-            value=float(current_price) if current_price > 0 else 0.0,
+            value=float(current_price) if current_price and current_price > 0 else 0.0,
             step=0.01,
             format="%.4f"
         )
     
+    # ENSURE order_price is always a valid number
+    if not order_price or order_price <= 0:
+        order_price = current_price
+    
+    if not order_price or order_price <= 0:
+        st.error("❌ Unable to determine order price. Check market data.")
+        st.stop()
+
     if selected_symbol in st.session_state.get("markets", {}):
         market = st.session_state["markets"][selected_symbol]
         min_amount = market['limits']['amount'].get('min', 0)
@@ -459,18 +467,21 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
     
     with col2:
         if st.button("🧪 Validate Order", use_container_width=True):
-            is_valid, result = validate_order_params(
-                st.session_state["exchange"],
-                st.session_state.get("markets", {}),
-                order_symbol,
-                order_side,
-                order_amount,
-                order_price
-            )
-            if is_valid:
-                st.success(f"✅ Order valid - Amount: {result['amount']}, Price: {result['price']}")
+            if order_price and order_price > 0 and order_amount and order_amount > 0:
+                is_valid, result = validate_order_params(
+                    st.session_state["exchange"],
+                    st.session_state.get("markets", {}),
+                    order_symbol,
+                    order_side,
+                    float(order_amount),
+                    float(order_price)
+                )
+                if is_valid:
+                    st.success(f"✅ Order valid - Amount: {result['amount']}, Price: {result['price']}")
+                else:
+                    st.error(f"❌ {result}")
             else:
-                st.error(f"❌ {result}")
+                st.error("❌ Invalid amount or price")
     
     with col3:
         if st.button("🔄 Reset Form", use_container_width=True):
