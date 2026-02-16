@@ -170,9 +170,33 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
                     st.write(f"**24h Volume:** {ticker.get('baseVolume', 'N/A')} {base_asset}")
                     st.write(f"**Index Price:** ${ticker.get('indexPrice', 'N/A')}")
                     
-                    # NEW: Fetch OHLCV candlestick data
+                    # NEW: Timeframe selector for charts
+                    chart_col1, chart_col2, chart_col3 = st.columns([2, 1, 1])
+                    with chart_col1:
+                        st.write("**Chart Settings**")
+                    with chart_col2:
+                        selected_timeframe = st.selectbox(
+                            "Timeframe",
+                            ["1h", "4h", "1d"],
+                            index=0,
+                            key="chart_timeframe"
+                        )
+                    with chart_col3:
+                        num_candles = st.number_input(
+                            "Candles",
+                            min_value=10,
+                            max_value=100,
+                            value=24,
+                            step=5
+                        )
+                    
+                    # Fetch OHLCV data for selected timeframe
                     try:
-                        ohlcv = st.session_state["exchange"].fetch_ohlcv(trading_pair, timeframe='1h', limit=24)
+                        ohlcv = st.session_state["exchange"].fetch_ohlcv(
+                            trading_pair,
+                            timeframe=selected_timeframe,
+                            limit=int(num_candles)
+                        )
                         
                         # Create candlestick chart
                         fig = go.Figure(data=[go.Candlestick(
@@ -180,21 +204,53 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
                             open=[candle[1] for candle in ohlcv],
                             high=[candle[2] for candle in ohlcv],
                             low=[candle[3] for candle in ohlcv],
-                            close=[candle[4] for candle in ohlcv]
+                            close=[candle[4] for candle in ohlcv],
+                            name="OHLC"
                         )])
                         
+                        # Add volume bars
+                        fig.add_trace(go.Bar(
+                            x=[datetime.fromtimestamp(candle[0]/1000) for candle in ohlcv],
+                            y=[candle[5] for candle in ohlcv],
+                            name="Volume",
+                            yaxis="y2",
+                            marker_color='rgba(128,128,128,0.5)'
+                        ))
+                        
+                        # Update layout with dual axes
                         fig.update_layout(
-                            title=f"{trading_pair} - 1H Chart",
+                            title=f"{trading_pair} - {selected_timeframe.upper()} Chart ({num_candles} candles)",
                             yaxis_title='Price (USD)',
+                            yaxis2=dict(
+                                title='Volume',
+                                overlaying='y',
+                                side='right'
+                            ),
                             xaxis_title='Time',
                             template='plotly_dark',
-                            height=500,
-                            xaxis_rangeslider_visible=False
+                            height=600,
+                            xaxis_rangeslider_visible=False,
+                            hovermode='x unified'
                         )
                         
                         st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Display OHLCV stats
+                        df_ohlcv = pd.DataFrame(
+                            ohlcv,
+                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                        )
+                        df_ohlcv['timestamp'] = pd.to_datetime(df_ohlcv['timestamp'], unit='ms')
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("High", f"${df_ohlcv['high'].max():.4f}")
+                        col2.metric("Low", f"${df_ohlcv['low'].min():.4f}")
+                        col3.metric("Avg Volume", f"{df_ohlcv['volume'].mean():.0f}")
+                        col4.metric("Total Volume", f"{df_ohlcv['volume'].sum():.0f}")
+                        
                     except Exception as chart_error:
                         st.warning(f"⚠️ Chart data unavailable: {str(chart_error)}")
+                        st.error(str(chart_error))
                 else:
                     st.warning("⚠️ No price data available")
             
