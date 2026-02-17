@@ -24,6 +24,7 @@ def validate_order_params(
 
         limits = market.get("limits", {})
         min_amount = limits.get("amount", {}).get("min")
+        max_amount = limits.get("amount", {}).get("max")
         min_cost = limits.get("cost", {}).get("min")
 
         amount_str = exchange.amount_to_precision(symbol, amount)
@@ -32,22 +33,21 @@ def validate_order_params(
         if min_amount is not None and amount < min_amount:
             return False, f"Amount {amount} is below minimum {min_amount}"
 
+        if max_amount is not None and amount > max_amount:
+            return False, f"Amount {amount} is above maximum {max_amount}"
+
         if min_cost is not None and price is not None and amount * price < min_cost:
             return False, f"Cost {amount * price} is below minimum {min_cost}"
-
-        if amount < min_amount:
-            return False, f"Amount too small. Minimum: {min_amount}"
-        if max_amount and amount > max_amount:
-            return False, f"Amount too large. Maximum: {max_amount}"
 
         validated_price: Optional[float] = None
         if price is not None:
             price_str = exchange.price_to_precision(symbol, price)
             validated_price = float(price_str) if price_str is not None else price
 
-            cost = amount * validated_price
-            if cost < min_cost:
-                return False, f"Order value too small. Minimum: ${min_cost}"
+            if min_cost is not None:
+                cost = amount * validated_price
+                if cost < min_cost:
+                    return False, f"Order value too small. Minimum: ${min_cost}"
 
         return True, {"amount": amount, "price": validated_price}
 
