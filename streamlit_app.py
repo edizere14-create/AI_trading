@@ -29,7 +29,9 @@ from engine.validation import validate_order_params
 from engine.execution import execute_order, place_stop_loss_order, place_take_profit_order
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import timedelta
+import numpy as np
 
 st.set_page_config(
     page_title="AI Trading Dashboard",
@@ -170,87 +172,117 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
                     st.write(f"**24h Volume:** {ticker.get('baseVolume', 'N/A')} {base_asset}")
                     st.write(f"**Index Price:** ${ticker.get('indexPrice', 'N/A')}")
                     
-                    # NEW: Timeframe selector for charts
-                    chart_col1, chart_col2, chart_col3 = st.columns([2, 1, 1])
+                    # --- Chart settings ---
+                    chart_col1, chart_col2, chart_col3, chart_col4 = st.columns([2, 1, 1, 2])
                     with chart_col1:
                         st.write("**Chart Settings**")
                     with chart_col2:
                         selected_timeframe = st.selectbox(
                             "Timeframe",
-                            ["1h", "4h", "1d"],
-                            index=0,
+                            ["1m", "15m", "30m", "1h", "4h", "1d", "1w"],
+                            index=2,
                             key="chart_timeframe"
                         )
                     with chart_col3:
                         num_candles = st.number_input(
                             "Candles",
-                            min_value=10,
-                            max_value=100,
-                            value=24,
-                            step=5
+                            min_value=20,
+                            max_value=300,
+                            value=120,
+                            step=10
                         )
-                    
-                    # Fetch OHLCV data for selected timeframe
+                    with chart_col4:
+                        indicators = st.multiselect(
+                            "Indicators",
+                            ["SMA", "EMA", "RSI", "MACD"],
+                            default=["SMA", "EMA"]
+                        )
+
+                    # --- Fetch OHLCV ---
                     try:
                         ohlcv = st.session_state["exchange"].fetch_ohlcv(
                             trading_pair,
                             timeframe=selected_timeframe,
                             limit=int(num_candles)
                         )
-                        
-                        # Create candlestick chart
-                        fig = go.Figure(data=[go.Candlestick(
-                            x=[datetime.fromtimestamp(candle[0]/1000) for candle in ohlcv],
-                            open=[candle[1] for candle in ohlcv],
-                            high=[candle[2] for candle in ohlcv],
-                            low=[candle[3] for candle in ohlcv],
-                            close=[candle[4] for candle in ohlcv],
-                            name="OHLC"
-                        )])
-                        
-                        # Add volume bars
-                        fig.add_trace(go.Bar(
-                            x=[datetime.fromtimestamp(candle[0]/1000) for candle in ohlcv],
-                            y=[candle[5] for candle in ohlcv],
-                            name="Volume",
-                            yaxis="y2",
-                            marker_color='rgba(128,128,128,0.5)'
-                        ))
-                        
-                        # Update layout with dual axes
-                        fig.update_layout(
-                            title=f"{trading_pair} - {selected_timeframe.upper()} Chart ({num_candles} candles)",
-                            yaxis_title='Price (USD)',
-                            yaxis2=dict(
-                                title='Volume',
-                                overlaying='y',
-                                side='right'
-                            ),
-                            xaxis_title='Time',
-                            template='plotly_dark',
-                            height=600,
-                            xaxis_rangeslider_visible=False,
-                            hovermode='x unified'
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Display OHLCV stats
-                        df_ohlcv = pd.DataFrame(
+
+                        df = pd.DataFrame(
                             ohlcv,
-                            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                            columns=["timestamp", "open", "high", "low", "close", "volume"]
                         )
-                        df_ohlcv['timestamp'] = pd.to_datetime(df_ohlcv['timestamp'], unit='ms')
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("High", f"${df_ohlcv['high'].max():.4f}")
-                        col2.metric("Low", f"${df_ohlcv['low'].min():.4f}")
-                        col3.metric("Avg Volume", f"{df_ohlcv['volume'].mean():.0f}")
-                        col4.metric("Total Volume", f"{df_ohlcv['volume'].sum():.0f}")
-                        
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+
+                        # Indicators
+                        if "SMA" in indicators:
+                            df["SMA_20"] = df["close"].rolling(20).mean()
+                        if "EMA" in indicators:
+                            df["EMA_20"] = df["close"].ewm(span=20, adjust=False).mean()
+                        if "RSI" in indicators:
+                            delta = df["close"].diff()
+                            gain = delta.clip(lower=0).rolling(14).mean()
+                            loss = (-delta.clip(upper=0)).rolling(14).mean()
+                            rs = gain / loss
+                            df["RSI_14"] = 100 - (100 / (1 + rs))
+                        if "MACD" in indicators:
+                            ema12 = df["close"].ewm(span=12, adjust=False).mean()
+                            ema26 = df["close"].ewm(span=26, adjust=False).mean()
+                            df["MACD"] = ema12 - ema26
+                            df["MACD_SIGNAL"] = df["MACD"].ewm(span=9, adjust=False).mean()
+                            df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
+
+                        # --- Candlestick + Indicators ---
+                        fig = make_subplots(
+                            rows=2 if "RSI" in indicators or "MACD" in indicators else 1,
+                            cols=1,
+                            shared_xaxes=True,
+                            row_heights=[0.7, 0.3] if ("RSI" in indicators or "MACD" in indicators) else [1.0],
+                            vertical_spacing=0.05
+                        )
+
+                        fig.add_trace(
+                            go.Candlestick(
+                                x=df["timestamp"],
+                                open=df["open"],
+                                high=df["high"],
+                                low=df["low"],
+                                close=df["close"],
+                                name="OHLC"
+                            ),
+                            row=1,
+                            col=1
+                        )
+
+                        if "SMA" in indicators:
+                            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["SMA_20"], name="SMA 20"), row=1, col=1)
+                        if "EMA" in indicators:
+                            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["EMA_20"], name="EMA 20"), row=1, col=1)
+
+                        if "RSI" in indicators:
+                            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["RSI_14"], name="RSI 14"), row=2, col=1)
+                            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+                            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+                        if "MACD" in indicators:
+                            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MACD"], name="MACD"), row=2, col=1)
+                            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["MACD_SIGNAL"], name="Signal"), row=2, col=1)
+                            fig.add_trace(go.Bar(x=df["timestamp"], y=df["MACD_HIST"], name="Hist"), row=2, col=1)
+
+                        fig.update_layout(
+                            title=f"{trading_pair} - {selected_timeframe.upper()} ({num_candles} candles)",
+                            template="plotly_dark",
+                            height=700,
+                            xaxis_rangeslider_visible=False,
+                            hovermode="x unified"
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # --- Data History ---
+                        with st.expander("📚 OHLCV Data History"):
+                            st.dataframe(df.tail(200), use_container_width=True)
+
                     except Exception as chart_error:
                         st.warning(f"⚠️ Chart data unavailable: {str(chart_error)}")
-                        st.error(str(chart_error))
                 else:
                     st.warning("⚠️ No price data available")
             
@@ -494,12 +526,94 @@ if "exchange" in st.session_state and st.session_state.exchange_connected:
     try:
         open_orders = st.session_state["exchange"].fetch_open_orders()
         if open_orders:
-            df = pd.DataFrame(open_orders)
-            st.dataframe(df[['symbol', 'side', 'type', 'amount', 'price', 'status']], use_container_width=True)
+            df_orders = pd.DataFrame(open_orders)
+            st.dataframe(df_orders[['id','symbol','side','type','amount','price','status']], use_container_width=True)
+
+            order_ids = df_orders["id"].tolist()
+            selected_order_id = st.selectbox("Select Order ID", order_ids)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("❌ Cancel Order"):
+                    try:
+                        st.session_state["exchange"].cancel_order(selected_order_id)
+                        st.success("Order cancelled")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Cancel failed: {str(e)}")
+
+            with col_b:
+                st.write("Modify Order (Cancel + Recreate)")
+                new_price = st.number_input("New Price", min_value=0.0, step=0.5, format="%.2f")
+                new_amount = st.number_input("New Amount", min_value=1.0, step=1.0, format="%.1f")
+                if st.button("✏️ Modify Order"):
+                    try:
+                        original = next(o for o in open_orders if o["id"] == selected_order_id)
+                        st.session_state["exchange"].cancel_order(selected_order_id)
+                        st.session_state["exchange"].create_order(
+                            symbol=original["symbol"],
+                            type="limit",
+                            side=original["side"],
+                            amount=new_amount,
+                            price=new_price
+                        )
+                        st.success("Order modified")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Modify failed: {str(e)}")
         else:
             st.info("No open orders")
     except Exception as e:
         st.error(f"Failed to fetch open orders: {str(e)}")
+    
+    st.divider()
+    
+    # ---------- OPEN POSITIONS ----------
+    st.subheader("📌 Open Positions")
+    try:
+        if st.session_state["exchange"].has.get("fetchPositions"):
+            positions = st.session_state["exchange"].fetch_positions()
+            if positions:
+                df_pos = pd.DataFrame(positions)
+                cols = [c for c in ["symbol", "side", "contracts", "entryPrice", "markPrice",
+                                    "unrealizedPnl", "percentage", "leverage"] if c in df_pos.columns]
+                st.dataframe(df_pos[cols], use_container_width=True)
+
+                # Close Position Controls
+                pos_symbols = df_pos["symbol"].tolist() if "symbol" in df_pos.columns else []
+                selected_pos_symbol = st.selectbox("Select Position", pos_symbols, key="close_pos_symbol")
+
+                pos_row = df_pos[df_pos["symbol"] == selected_pos_symbol].iloc[0]
+                pos_side = pos_row.get("side")
+                pos_contracts = pos_row.get("contracts")
+
+                colx, coly = st.columns(2)
+                with colx:
+                    st.write(f"Side: **{pos_side}** | Contracts: **{pos_contracts}**")
+                with coly:
+                    if st.button("🧯 Close Position (Market)"):
+                        try:
+                            if not pos_contracts or float(pos_contracts) <= 0:
+                                st.error("Invalid contracts amount")
+                            else:
+                                close_side = "sell" if str(pos_side).lower() == "long" else "buy"
+                                st.session_state["exchange"].create_order(
+                                    symbol=selected_pos_symbol,
+                                    type="market",
+                                    side=close_side,
+                                    amount=float(pos_contracts),
+                                    params={"reduceOnly": True}
+                                )
+                                st.success("Position close order submitted")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Close failed: {str(e)}")
+            else:
+                st.info("No open positions")
+        else:
+            st.info("Exchange does not support fetchPositions")
+    except Exception as e:
+        st.error(f"Failed to fetch positions: {str(e)}")
     
     st.divider()
     
