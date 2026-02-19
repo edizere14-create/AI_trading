@@ -16,7 +16,7 @@ from app.services.websocket_service import ConnectionManager
 from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
-from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest
+from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest, routes_webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ app.include_router(routes_risk.router, prefix="/risk", tags=["risk"])
 app.include_router(routes_indicators.router, prefix="/indicators", tags=["indicators"])
 app.include_router(routes_strategy.router, prefix="/strategy", tags=["strategy"])
 app.include_router(routes_backtest.router, prefix="/backtest", tags=["backtest"])
+app.include_router(routes_webhooks.router, prefix="/api", tags=["webhooks"])
 
 @app.get("/health")
 async def health_check() -> dict[str, str | int | bool]:
