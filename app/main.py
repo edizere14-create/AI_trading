@@ -11,13 +11,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPExcept
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-import logging
 
 from app.services.websocket_service import ConnectionManager
 from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
-from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy
+from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +71,7 @@ app.include_router(routes_data.router, prefix="/data", tags=["data"])
 app.include_router(routes_risk.router, prefix="/risk", tags=["risk"])
 app.include_router(routes_indicators.router, prefix="/indicators", tags=["indicators"])
 app.include_router(routes_strategy.router, prefix="/strategy", tags=["strategy"])
+app.include_router(routes_backtest.router, prefix="/backtest", tags=["backtest"])
 
 @app.get("/health")
 async def health_check() -> dict[str, str | int | bool]:

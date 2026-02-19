@@ -1,93 +1,170 @@
-# Backtest service for running strategies on historical data
-from typing import Any
-from app.strategies.base import BaseStrategy
+import backtrader as bt
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
+import logging
 
+logger = logging.getLogger(__name__)
+
+class BacktestStrategy(bt.Strategy):
+    """Base backtesting strategy with signal integration"""
+    
+    params = {
+        'take_profit': 0.02,
+        'stop_loss': 0.01,
+        'position_size': 0.1,
+    }
+    
+    def __init__(self):
+        self.signals = None
+        self.trades_log = []
+        
+    def next(self):
+        if not self.position:
+            if self.signals[0] > 0.5:  # Buy signal
+                size = self.broker.getcash() * self.params['position_size'] / self.data.close[0]
+                self.buy(size=size)
+                
+        else:
+            if self.signals[0] < 0.5:  # Sell signal
+                self.sell(size=self.position.size)
+    
+    def notify_trade(self, trade):
+        if trade.isclosed:
+            self.trades_log.append({
+                'date': bt.num2date(trade.barlen),
+                'entry': trade.barlen,
+                'exit': trade.barlen,
+                'pnl': trade.pnl,
+                'pnlpercent': trade.pnlpercent,
+            })
 
 
 class BacktestService:
-	def __init__(self, strategy: BaseStrategy, initial_balances: dict[str, float] | None = None):
-		self.strategy = strategy
-		self.initial_balances = initial_balances or {"USD": 10000.0}
-
-	def run(self, historical_data: list[dict[str, Any]]) -> dict[str, Any]:
-		# historical_data should be a list of dicts, each with asset info, e.g. {'asset': 'BTC', 'close': 42000, ...}
-		balances = self.initial_balances.copy()
-		positions = {asset: 0.0 for asset in balances if asset != "USD"}
-		signals = []
-		trades = []
-		for i in range(1, len(historical_data)):
-			data_slice = historical_data[:i+1]
-			signal = self.strategy.generate_signals(data_slice)
-			signals.append(signal)
-			asset = historical_data[i].get('asset', 'BTC')
-			price = historical_data[i]['close']
-			# Simulate order execution
-			if signal and signal.get('action') == 'buy' and positions.get(asset, 0) == 0:
-				qty = balances["USD"] // price
-				if qty > 0:
-					positions[asset] = qty
-					balances["USD"] -= qty * price
-					trades.append({'type': 'buy', 'asset': asset, 'qty': qty, 'price': price, 'time': historical_data[i]['time']})
-			elif signal and signal.get('action') == 'sell' and positions.get(asset, 0) > 0:
-				balances["USD"] += positions[asset] * price
-				trades.append({'type': 'sell', 'asset': asset, 'qty': positions[asset], 'price': price, 'time': historical_data[i]['time']})
-				positions[asset] = 0
-		# Calculate final portfolio value
-		final_value = balances["USD"]
-		for asset, qty in positions.items():
-			if qty > 0:
-				# Find last price for asset
-				last_price = next((d['close'] for d in reversed(historical_data) if d.get('asset', 'BTC') == asset), None)
-				if last_price:
-					final_value += qty * last_price
-		pnl = final_value - sum(self.initial_balances.values())
-
-		# Advanced analytics
-		values = []
-		running_bal = balances["USD"]
-		running_positions = positions.copy()
-		for i in range(1, len(historical_data)):
-			asset = historical_data[i].get('asset', 'BTC')
-			price = historical_data[i]['close']
-			val = running_bal
-			for a, qty in running_positions.items():
-				if qty > 0:
-					last_price = price if a == asset else next((d['close'] for d in reversed(historical_data[:i+1]) if d.get('asset', 'BTC') == a), None)
-					if last_price:
-						val += qty * last_price
-			values.append(val)
-
-		# Max drawdown
-		peak = values[0] if values else self.initial_balances["USD"]
-		max_drawdown = 0.0
-		for v in values:
-			if v > peak:
-				peak = v
-			drawdown = (peak - v) / peak if peak else 0
-			if drawdown > max_drawdown:
-				max_drawdown = drawdown
-
-		# Sharpe ratio
-		import math
-		returns = [0] + [math.log(values[i]/values[i-1]) for i in range(1, len(values)) if values[i-1] > 0]
-		avg_return = sum(returns) / len(returns) if returns else 0
-		std_return = math.sqrt(sum((r - avg_return) ** 2 for r in returns) / len(returns)) if returns else 0
-		sharpe = (avg_return / std_return) * math.sqrt(252) if std_return else 0
-
-		# Trade stats
-		num_trades = len(trades)
-		num_wins = sum(1 for t in trades if t['type'] == 'sell' and t['price'] > t.get('entry_price', 0))
-		num_losses = num_trades - num_wins
-
-		return {
-			'signals': signals,
-			'trades': trades,
-			'final_balances': balances,
-			'final_value': final_value,
-			'pnl': pnl,
-			'max_drawdown': max_drawdown,
-			'sharpe_ratio': sharpe,
-			'num_trades': num_trades,
-			'num_wins': num_wins,
-			'num_losses': num_losses
-		}
+    """Enterprise backtesting with Backtrader"""
+    
+    def __init__(self, db_session):
+        self.db_session = db_session
+        self.cerebro = None
+        
+    def run_backtest(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        data: pd.DataFrame,
+        signals: List[float],
+        initial_cash: float = 10000.0,
+        commission: float = 0.001,
+    ) -> Dict:
+        """
+        Run accurate backtest with signal integration
+        
+        Args:
+            symbol: Trading pair (e.g., 'XRPUSD')
+            start_date: Backtest start
+            end_date: Backtest end
+            data: OHLCV DataFrame
+            signals: ML-generated signals
+            initial_cash: Starting capital
+            commission: Trading fee
+            
+        Returns:
+            Backtest results with metrics
+        """
+        try:
+            self.cerebro = bt.Cerebro()
+            self.cerebro.broker.setcash(initial_cash)
+            self.cerebro.broker.setcommission(commission=commission)
+            
+            # Prepare data feed
+            data_feed = self._prepare_datafeed(data, symbol)
+            self.cerebro.adddata(data_feed)
+            
+            # Add strategy with signals
+            strategy_class = self._create_signal_strategy(signals)
+            self.cerebro.addstrategy(strategy_class)
+            
+            # Add analyzers for comprehensive metrics
+            self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
+            self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+            self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+            self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+            
+            # Run backtest
+            logger.info(f"Starting backtest for {symbol} ({start_date} to {end_date})")
+            results = self.cerebro.run()
+            strat = results[0]
+            
+            # Extract metrics
+            metrics = self._extract_metrics(strat, initial_cash)
+            metrics['symbol'] = symbol
+            metrics['start_date'] = start_date
+            metrics['end_date'] = end_date
+            
+            logger.info(f"Backtest complete. Sharpe: {metrics['sharpe_ratio']:.2f}")
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Backtest failed: {str(e)}")
+            raise
+    
+    def _prepare_datafeed(self, data: pd.DataFrame, symbol: str) -> bt.feeds.PandasData:
+        """Convert DataFrame to Backtrader feed"""
+        data_copy = data.copy()
+        data_copy['datetime'] = pd.to_datetime(data_copy.index)
+        data_copy.set_index('datetime', inplace=True)
+        
+        return bt.feeds.PandasData(
+            dataname=data_copy,
+            fromdate=data_copy.index[0],
+            todate=data_copy.index[-1],
+        )
+    
+    def _create_signal_strategy(self, signals: List[float]):
+        """Dynamically create strategy with signals"""
+        class SignalStrategy(BacktestStrategy):
+            def __init__(self):
+                super().__init__()
+                self.signal_array = signals
+                self.signal_idx = 0
+            
+            def next(self):
+                if self.signal_idx < len(self.signal_array):
+                    sig = self.signal_array[self.signal_idx]
+                    self.signals = [sig]
+                    super().next()
+                    self.signal_idx += 1
+        
+        return SignalStrategy
+    
+    def _extract_metrics(self, strategy, initial_cash: float) -> Dict:
+        """Extract comprehensive backtest metrics"""
+        analyzers = strategy.analyzers
+        
+        final_value = strategy.broker.getvalue()
+        total_return = (final_value - initial_cash) / initial_cash
+        
+        sharpe = analyzers.sharpe.get_analysis().get('sharperatio', 0)
+        drawdown = analyzers.drawdown.get_analysis().get('max', {}).get('drawdown', 0)
+        
+        trades_analysis = analyzers.trades.get_analysis()
+        total_trades = trades_analysis.get('total', {}).get('total', 0)
+        win_rate = trades_analysis.get('won', {}).get('total', 0) / max(total_trades, 1)
+        
+        return {
+            'final_value': final_value,
+            'total_return': total_return,
+            'sharpe_ratio': sharpe,
+            'max_drawdown': drawdown,
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'profit_factor': self._calculate_profit_factor(trades_analysis),
+        }
+    
+    def _calculate_profit_factor(self, trades_analysis: Dict) -> float:
+        """Calculate profit factor (gross profit / gross loss)"""
+        gross_profit = trades_analysis.get('won', {}).get('pnl', {}).get('total', 0)
+        gross_loss = abs(trades_analysis.get('lost', {}).get('pnl', {}).get('total', 0))
+        
+        return gross_profit / max(gross_loss, 0.001)
