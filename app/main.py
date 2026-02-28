@@ -77,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         routes_momentum.momentum_worker = momentum_worker
         routes_momentum.momentum_task = None
+        routes_momentum.startup_error = None
         logger.info("Momentum worker initialized")
 
         if os.getenv("MOMENTUM_AUTO_START", "false").strip().lower() in {"1", "true", "yes", "on"}:
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         momentum_worker = None
         routes_momentum.momentum_worker = None
         routes_momentum.momentum_task = None
+        routes_momentum.startup_error = str(exc)
         logger.error("Failed to initialize momentum worker: %s", exc)
     
     yield

@@ -10,6 +10,7 @@ router = APIRouter(prefix="/momentum", tags=["momentum"])
 
 momentum_worker = None
 momentum_task = None
+startup_error = None
 fallback_is_running = False
 fallback_symbol = "PI_XBTUSD"
 
@@ -56,11 +57,12 @@ async def stop_momentum() -> dict[str, Any]:
 
 @router.get("/status")
 async def get_momentum_status() -> dict[str, Any]:
-    global momentum_worker, fallback_is_running, fallback_symbol
+    global momentum_worker, startup_error, fallback_is_running, fallback_symbol
     if momentum_worker is None:
         return {
             "is_running": fallback_is_running,
             "symbol": fallback_symbol,
+            "startup_error": startup_error,
             "signal_count": 0,
             "execution_count": 0,
             "risk": {
