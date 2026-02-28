@@ -9,9 +9,12 @@ from typing import Any
 import pandas as pd
 import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Remove plotly import - use built-in Streamlit charts instead
-DEFAULT_API_URL = os.getenv("API_URL", "http://localhost:8000")
+DEFAULT_API_URL = os.getenv("API_BASE_URL", os.getenv("API_URL", "http://127.0.0.1:8000"))
 
 
 def api_get(base_url: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -38,8 +41,15 @@ st.title("Kraken Futures Demo Monitor")
 
 with st.sidebar:
     st.header("Settings")
-    default_api_url = st.secrets.get("API_URL", DEFAULT_API_URL) if hasattr(st, "secrets") else DEFAULT_API_URL
+    default_api_url = DEFAULT_API_URL
+    if hasattr(st, "secrets"):
+        try:
+            default_api_url = st.secrets.get("API_BASE_URL", st.secrets.get("API_URL", DEFAULT_API_URL))
+        except Exception:
+            default_api_url = DEFAULT_API_URL
     api_url = st.text_input("API URL", value=default_api_url).rstrip("/")
+    if "streamlit.app" in api_url.lower():
+        st.warning("API URL appears to be a Streamlit frontend. Use your backend API URL (e.g. http://127.0.0.1:8000).")
     symbol = st.text_input("Symbol", value="PI_XBTUSD")
     history_limit = st.slider("History Rows", min_value=10, max_value=200, value=50, step=10)
     auto_refresh = st.checkbox("Auto-refresh (10s)", value=False)

@@ -1,8 +1,93 @@
 # Production Deployment Guide
 
+## Quick Start (Live + Demo)
+
+### 1) Start and verify local app (API + Dashboard)
+
+```powershell
+npm run local:smoke
+```
+
+Expected output includes:
+
+- `SMOKE_API_STATUS=200`
+- `SMOKE_UI_STATUS=200`
+- `SMOKE_LOCAL_RESULT=OK`
+
+Open:
+
+- Dashboard: `http://127.0.0.1:8501`
+- API docs: `http://127.0.0.1:8000/docs`
+
+### 2) Verify Kraken Futures demo connectivity + safe order lifecycle
+
+Set in `.env`:
+
+- `KRAKEN_API_KEY=...`
+- `KRAKEN_API_SECRET=...`
+
+```powershell
+npm run kraken:demo:smoke
+```
+
+Expected output includes:
+
+- `DEMO_SMOKE_RESULT=OK`
+
+### 3) One-command full verification (local + Kraken demo)
+
+```powershell
+npm run local:smoke:all
+```
+
+Expected output includes:
+
+- `SMOKE_LOCAL_RESULT=OK`
+- `DEMO_SMOKE_RESULT=OK`
+- `SMOKE_LOCAL_ALL_RESULT=OK`
+
+## Streamlit Community Cloud (Monitor)
+
+Deploy the monitor UI from `cloud_streamlit/streamlit_app.py`.
+
+### 1) Push repo to GitHub
+
+Ensure these files are in your branch:
+
+- `cloud_streamlit/streamlit_app.py`
+- `cloud_streamlit/requirements.txt`
+
+### 2) Create app in Streamlit Cloud
+
+In Streamlit Community Cloud app setup:
+
+- Repository: this repository
+- Branch: your deployment branch
+- Main file path: `cloud_streamlit/streamlit_app.py`
+
+### 3) Set app secrets
+
+In **Settings → Secrets**:
+
+```toml
+API_BASE_URL = "https://<your-backend-domain>"
+```
+
+Notes:
+
+- Do not use a `streamlit.app` URL as `API_BASE_URL`.
+- Do not use `127.0.0.1` in cloud deployment.
+- Backend must expose `/health`, `/momentum/status`, `/momentum/history` publicly.
+
+### 4) Verify deployment
+
+- Open the deployed Streamlit URL
+- Confirm health/status/history return without 4xx/5xx errors
+
 ## Docker Deployment
 
 ### 1. Build & Run Locally
+
 
 ```bash
 docker-compose up -d
