@@ -19,7 +19,26 @@ try:
 except ImportError:
     from app.strategies.momentum import RSIStrategy as MomentumStrategy
 from app.services.data_service import DataService
-from app.services.trade_store import trade_store
+try:
+    from app.services.trade_store import trade_store
+except ImportError:
+    class _NullTradeStore:
+        def add(self, trade: dict[str, Any]) -> None:
+            return None
+
+        def add_trade(self, trade: dict[str, Any]) -> None:
+            return None
+
+        def save_trade(self, trade: dict[str, Any]) -> None:
+            return None
+
+        def record_trade(self, trade: dict[str, Any]) -> None:
+            return None
+
+        def append(self, trade: dict[str, Any]) -> None:
+            return None
+
+    trade_store = _NullTradeStore()
 
 logger = logging.getLogger(__name__)
 
