@@ -36,6 +36,16 @@ def safe_request(fn, *args, **kwargs) -> tuple[dict[str, Any] | None, str | None
         return None, str(exc)
 
 
+def api_get_first_available(base_url: str, paths: list[str], params: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    last_err: str | None = None
+    for path in paths:
+        data, err = safe_request(api_get, base_url, path, params)
+        if err is None:
+            return data, None, path
+        last_err = err
+    return None, last_err, None
+
+
 st.set_page_config(page_title="Trading Monitor", layout="wide")
 st.title("Kraken Futures Demo Monitor")
 
@@ -58,8 +68,15 @@ with st.sidebar:
 
 # Fetch data
 health, health_err = safe_request(api_get, api_url, "/health")
-status, status_err = safe_request(api_get, api_url, "/momentum/status")
-history, history_err = safe_request(api_get, api_url, "/momentum/history", {"limit": history_limit})
+status, status_err, status_path = api_get_first_available(
+    api_url,
+    ["/momentum/status", "/risk/status", "/risk/check"],
+)
+history, history_err, history_path = api_get_first_available(
+    api_url,
+    ["/momentum/history"],
+    {"limit": history_limit},
+)
 
 # Worker controls
 st.subheader("Worker Control")
@@ -87,11 +104,16 @@ if health_err:
 if status_err:
     st.error(f"❌ Status check failed: {status_err}")
 if history_err:
-    st.error(f"❌ History request failed: {history_err}")
+    st.warning("History endpoint unavailable on this backend (expected: /momentum/history).")
 
 if not status:
     st.info("Backend is unreachable or not started. Update the API URL in the sidebar.")
     st.stop()
+
+if status_path:
+    st.caption(f"Status endpoint: {status_path}")
+if history_path:
+    st.caption(f"History endpoint: {history_path}")
 
 # Metrics
 risk = status.get("risk", {})
