@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 from typing import Any
 
@@ -15,15 +16,50 @@ fallback_is_running = False
 fallback_symbol = "PI_XBTUSD"
 
 
+def _build_momentum_worker(symbol: str):
+    from app.services.data_service import DataService
+    from engine.core.execution_engine import ExecutionEngine
+    from engine.workers.momentum_worker import MomentumWorker
+
+    execution_engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key=os.getenv("KRAKEN_API_KEY", ""),
+        api_secret=os.getenv("KRAKEN_API_SECRET", ""),
+        paper_mode=True,
+        sandbox=True,
+    )
+    data_service = DataService()
+    return MomentumWorker(
+        symbol=symbol,
+        interval=os.getenv("MOMENTUM_INTERVAL", "1m"),
+        execution_engine=execution_engine,
+        data_service=data_service,
+        momentum_period=int(os.getenv("MOMENTUM_PERIOD", "14")),
+        buy_threshold=float(os.getenv("MOMENTUM_BUY_THRESHOLD", "0.01")),
+        sell_threshold=float(os.getenv("MOMENTUM_SELL_THRESHOLD", "-0.01")),
+        account_balance=float(os.getenv("MOMENTUM_ACCOUNT_BALANCE", "1000")),
+    )
+
+
 @router.post("/start")
 async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
-    global momentum_worker, momentum_task, fallback_is_running, fallback_symbol
+    global momentum_worker, momentum_task, startup_error, fallback_is_running, fallback_symbol
     if symbol:
         fallback_symbol = symbol
 
     if momentum_worker is None:
-        fallback_is_running = True
-        return {"status": "started", "symbol": fallback_symbol, "mode": "fallback"}
+        try:
+            momentum_worker = _build_momentum_worker(fallback_symbol)
+            startup_error = None
+        except Exception as exc:
+            startup_error = str(exc)
+            fallback_is_running = True
+            return {
+                "status": "started",
+                "symbol": fallback_symbol,
+                "mode": "fallback",
+                "startup_error": startup_error,
+            }
 
     if symbol and hasattr(momentum_worker, "symbol"):
         momentum_worker.symbol = symbol
