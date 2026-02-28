@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
+import time
 from typing import Any
 
 import pandas as pd
@@ -12,25 +13,34 @@ import streamlit as st
 
 # Remove plotly import - use built-in Streamlit charts instead
 DEFAULT_API_URL = os.getenv("API_BASE_URL", os.getenv("API_URL", "http://127.0.0.1:8000"))
+REQUEST_TIMEOUT_SEC = 20
+REQUEST_RETRIES = 2
 
 
 def api_get(base_url: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    response = requests.get(f"{base_url}{path}", params=params, timeout=5)
+    response = requests.get(f"{base_url}{path}", params=params, timeout=REQUEST_TIMEOUT_SEC)
     response.raise_for_status()
     return response.json()
 
 
 def api_post(base_url: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    response = requests.post(f"{base_url}{path}", params=params, timeout=5)
+    response = requests.post(f"{base_url}{path}", params=params, timeout=REQUEST_TIMEOUT_SEC)
     response.raise_for_status()
     return response.json()
 
 
 def safe_request(fn, *args, **kwargs) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        return fn(*args, **kwargs), None
-    except requests.RequestException as exc:
-        return None, str(exc)
+    last_error: str | None = None
+    for attempt in range(REQUEST_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs), None
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            if attempt < REQUEST_RETRIES:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return None, last_error
+    return None, last_error
 
 
 def api_get_first_available(base_url: str, paths: list[str], params: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None, str | None]:
@@ -67,7 +77,7 @@ with st.sidebar:
 health, health_err = safe_request(api_get, api_url, "/health")
 status, status_err, status_path = api_get_first_available(
     api_url,
-    ["/momentum/status", "/risk/status", "/risk/check"],
+    ["/momentum/status", "/risk/status"],
 )
 history, history_err, history_path = api_get_first_available(
     api_url,
