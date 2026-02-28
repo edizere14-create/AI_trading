@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -7,13 +9,14 @@ from fastapi import APIRouter, Query
 router = APIRouter(prefix="/momentum", tags=["momentum"])
 
 momentum_worker = None
+momentum_task = None
 fallback_is_running = False
 fallback_symbol = "PI_XBTUSD"
 
 
 @router.post("/start")
 async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
-    global momentum_worker, fallback_is_running, fallback_symbol
+    global momentum_worker, momentum_task, fallback_is_running, fallback_symbol
     if symbol:
         fallback_symbol = symbol
 
@@ -24,25 +27,29 @@ async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
     if symbol and hasattr(momentum_worker, "symbol"):
         momentum_worker.symbol = symbol
 
+    if momentum_task and not momentum_task.done():
+        return {"status": "already_running", "symbol": getattr(momentum_worker, "symbol", fallback_symbol)}
+
     if hasattr(momentum_worker, "start"):
-        result = momentum_worker.start()
-        if hasattr(result, "__await__"):
-            await result
+        momentum_task = asyncio.create_task(momentum_worker.start())
 
     return {"status": "started", "symbol": getattr(momentum_worker, "symbol", fallback_symbol)}
 
 
 @router.post("/stop")
 async def stop_momentum() -> dict[str, Any]:
-    global momentum_worker, fallback_is_running
+    global momentum_worker, momentum_task, fallback_is_running
     if momentum_worker is None:
         fallback_is_running = False
         return {"status": "stopped", "mode": "fallback"}
 
     if hasattr(momentum_worker, "stop"):
-        result = momentum_worker.stop()
-        if hasattr(result, "__await__"):
-            await result
+        await momentum_worker.stop()
+    if momentum_task and not momentum_task.done():
+        momentum_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await momentum_task
+    momentum_task = None
 
     return {"status": "stopped"}
 

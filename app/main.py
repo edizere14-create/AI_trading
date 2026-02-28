@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import AsyncGenerator
 from datetime import datetime, timezone
 
@@ -17,12 +17,17 @@ from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
 from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest, routes_webhooks, routes_momentum
+from engine.workers.momentum_worker import MomentumWorker
+from engine.core.execution_engine import ExecutionEngine
+from app.services.data_service import DataService
 
 logger = logging.getLogger(__name__)
 
 models: TradingAIModels | None = None
 manager: ConnectionManager = ConnectionManager()
 strategy_manager: StrategyManager = StrategyManager()
+momentum_worker: MomentumWorker | None = None
+momentum_task: asyncio.Task | None = None
 
 # Initialize Kraken broker
 kraken_broker = KrakenBroker(
@@ -33,7 +38,7 @@ kraken_broker = KrakenBroker(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for startup/shutdown."""
-    global models
+    global models, momentum_worker, momentum_task
     
     # Startup
     logger.info("Starting AI Trading application...")
@@ -45,6 +50,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         strategy_manager.create_rsi_strategy("XXBTZUSD", overbought=70, oversold=30)
         strategy_manager.create_rsi_strategy("XETHZUSD", overbought=70, oversold=30)
         logger.info("Trading strategies initialized")
+
+        execution_engine = ExecutionEngine(
+            exchange_id="krakenfutures",
+            api_key=os.getenv("KRAKEN_API_KEY", ""),
+            api_secret=os.getenv("KRAKEN_API_SECRET", ""),
+            paper_mode=True,
+            sandbox=True,
+        )
+        data_service = DataService()
+        momentum_worker = MomentumWorker(
+            symbol=os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PI_XBTUSD"),
+            interval=os.getenv("MOMENTUM_INTERVAL", "1m"),
+            execution_engine=execution_engine,
+            data_service=data_service,
+            momentum_period=int(os.getenv("MOMENTUM_PERIOD", "14")),
+            buy_threshold=float(os.getenv("MOMENTUM_BUY_THRESHOLD", "0.01")),
+            sell_threshold=float(os.getenv("MOMENTUM_SELL_THRESHOLD", "-0.01")),
+            account_balance=float(os.getenv("MOMENTUM_ACCOUNT_BALANCE", "1000")),
+        )
+        routes_momentum.momentum_worker = momentum_worker
+        routes_momentum.momentum_task = None
+
+        if os.getenv("MOMENTUM_AUTO_START", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            momentum_task = asyncio.create_task(momentum_worker.start())
+            routes_momentum.momentum_task = momentum_task
+            logger.info("Momentum worker auto-started")
     except Exception as exc:
         logger.error("Failed to initialize application: %s", exc)
     
@@ -52,6 +83,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # Shutdown
     logger.info("Shutting down AI Trading application...")
+    if momentum_worker and momentum_worker.is_running:
+        await momentum_worker.stop()
+    if momentum_task and not momentum_task.done():
+        momentum_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await momentum_task
     if models:
         models = None
 
