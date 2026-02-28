@@ -14,7 +14,10 @@ from typing import Any, Dict, Optional
 
 from engine.core.execution_engine import ExecutionEngine
 from engine.core.risk_manager import RiskManager, RiskConfig
-from app.strategies.momentum import MomentumStrategy
+try:
+    from app.strategies.momentum import MomentumStrategy
+except ImportError:
+    from app.strategies.momentum import RSIStrategy as MomentumStrategy
 from app.services.data_service import DataService
 from app.services.trade_store import trade_store
 
