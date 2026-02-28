@@ -45,12 +45,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         models = TradingAIModels()
         logger.info("AI models initialized")
-        
-        # Initialize strategies
+    except Exception as exc:
+        models = None
+        logger.warning("AI models unavailable, continuing without them: %s", exc)
+
+    try:
         strategy_manager.create_rsi_strategy("XXBTZUSD", overbought=70, oversold=30)
         strategy_manager.create_rsi_strategy("XETHZUSD", overbought=70, oversold=30)
         logger.info("Trading strategies initialized")
+    except Exception as exc:
+        logger.warning("Failed to initialize default strategies: %s", exc)
 
+    try:
         execution_engine = ExecutionEngine(
             exchange_id="krakenfutures",
             api_key=os.getenv("KRAKEN_API_KEY", ""),
@@ -71,13 +77,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         routes_momentum.momentum_worker = momentum_worker
         routes_momentum.momentum_task = None
+        logger.info("Momentum worker initialized")
 
         if os.getenv("MOMENTUM_AUTO_START", "false").strip().lower() in {"1", "true", "yes", "on"}:
             momentum_task = asyncio.create_task(momentum_worker.start())
             routes_momentum.momentum_task = momentum_task
             logger.info("Momentum worker auto-started")
     except Exception as exc:
-        logger.error("Failed to initialize application: %s", exc)
+        momentum_worker = None
+        routes_momentum.momentum_worker = None
+        routes_momentum.momentum_task = None
+        logger.error("Failed to initialize momentum worker: %s", exc)
     
     yield
     
