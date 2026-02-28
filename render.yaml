@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: ai-trading-backend
+    env: docker
+    plan: free
+    branch: streamlit-deploy
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: TRADING_PAPER_MODE
+        value: true
+      - key: EXECUTION_EXCHANGE_ID
+        value: krakenfutures
+      - key: MARKET_DATA_EXCHANGE_ID
+        value: krakenfutures
+      - key: KRAKEN_FUTURES_DEMO
+        value: true
+      - key: MOMENTUM_DEFAULT_SYMBOL
+        value: PI_XBTUSD
+      - key: MOMENTUM_AUTO_START
+        value: true
+      - key: KRAKEN_API_KEY
+        sync: false
+      - key: KRAKEN_API_SECRET
+        sync: false
+
+  - type: web
+    name: ai-trading-dashboard
+    env: python
+    plan: free
+    branch: streamlit-deploy
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: STREAMLIT_APP_MODE
+        value: backend-api
+      - key: API_BASE_URL
+        value: https://ai-trading-1-dwvg.onrender.com
+      - key: WS_URL
+        value: ws://127.0.0.1:8000/ws/price
