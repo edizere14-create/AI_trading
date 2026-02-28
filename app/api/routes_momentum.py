@@ -9,6 +9,37 @@ router = APIRouter(prefix="/momentum", tags=["momentum"])
 momentum_worker = None
 
 
+@router.post("/start")
+async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
+    global momentum_worker
+    if momentum_worker is None:
+        return {"status": "unavailable", "detail": "Momentum worker not initialized", "symbol": symbol or "PI_XBTUSD"}
+
+    if symbol and hasattr(momentum_worker, "symbol"):
+        momentum_worker.symbol = symbol
+
+    if hasattr(momentum_worker, "start"):
+        result = momentum_worker.start()
+        if hasattr(result, "__await__"):
+            await result
+
+    return {"status": "started", "symbol": getattr(momentum_worker, "symbol", symbol or "PI_XBTUSD")}
+
+
+@router.post("/stop")
+async def stop_momentum() -> dict[str, Any]:
+    global momentum_worker
+    if momentum_worker is None:
+        return {"status": "unavailable", "detail": "Momentum worker not initialized"}
+
+    if hasattr(momentum_worker, "stop"):
+        result = momentum_worker.stop()
+        if hasattr(result, "__await__"):
+            await result
+
+    return {"status": "stopped"}
+
+
 @router.get("/status")
 async def get_momentum_status() -> dict[str, Any]:
     global momentum_worker
