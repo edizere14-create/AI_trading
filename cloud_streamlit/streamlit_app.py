@@ -9,9 +9,6 @@ from typing import Any
 import pandas as pd
 import requests
 import streamlit as st
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Remove plotly import - use built-in Streamlit charts instead
 DEFAULT_API_URL = os.getenv("API_BASE_URL", os.getenv("API_URL", "http://127.0.0.1:8000"))
