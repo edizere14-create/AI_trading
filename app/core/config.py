@@ -4,7 +4,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Union
 
+import os
 import yaml
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -24,8 +27,6 @@ def load_strategies() -> Dict[str, Any]:
 def load_broker(broker_name: str) -> Dict[str, Any]:
     return load_config(f"configs/brokers/{broker_name}.yaml")
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -34,7 +35,7 @@ class Settings(BaseSettings):
     )
     
     # Required fields (loaded from .env)
-    DATABASE_URL: str = ""
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_trading.db")
     JWT_SECRET: str = ""
     KRAKEN_API_KEY: str = ""
     KRAKEN_API_SECRET: str = ""
@@ -49,6 +50,10 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "http://localhost:3000"
     TRADING_MODE: str = "kraken"
     REDIS_URL: str = "redis://localhost:6379/0"
+    API_BASE_URL: str = "http://127.0.0.1:8000"
+    WS_URL: str = "ws://127.0.0.1:8000/ws/price"
+    HTTP_TIMEOUT_SEC: int = 3
+    USE_MOCK_IF_OFFLINE: bool = True
 
     # Risk profiles
     RISK_PROFILES: Dict[str, Any] = {
@@ -68,5 +73,34 @@ class Settings(BaseSettings):
             "max_leverage": 5.0
         }
     }
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def _parse_debug(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on", "debug", "dev", "development"}:
+            return True
+        if text in {"0", "false", "no", "off", "release", "prod", "production"}:
+            return False
+        return False
+
+    @property
+    def api_base_url(self) -> str:
+        return self.API_BASE_URL
+
+    @property
+    def ws_url(self) -> str:
+        return self.WS_URL
+
+    @property
+    def timeout_sec(self) -> int:
+        return self.HTTP_TIMEOUT_SEC
+
+    @property
+    def use_mock_if_offline(self) -> bool:
+        return self.USE_MOCK_IF_OFFLINE
+
 
 settings = Settings()
