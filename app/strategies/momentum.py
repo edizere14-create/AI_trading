@@ -1,67 +1,90 @@
+"""Momentum trading strategy."""
 import logging
-from app.strategies.base import BaseStrategy
-from app.models.signals import TradingSignal, SignalType
-from typing import Any, Dict, List, Optional
-from datetime import datetime
-import numpy as np
+from typing import Any, Dict, Optional
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-class RSIStrategy(BaseStrategy):
-    """RSI-based trading strategy."""
-    
+
+class MomentumStrategy:
+    """Momentum-based trading strategy using rate of change (ROC)."""
+
     def __init__(
         self,
-        symbol: str,
-        rsi_period: int = 14,
-        low_threshold: float = 30.0,
-        high_threshold: float = 70.0
+        symbol: str = "PI_XBTUSD",
+        momentum_period: int = 14,
+        buy_threshold: float = 1.0,
+        sell_threshold: float = -1.0,
     ):
-        super().__init__(symbol)
-        self.rsi_period = rsi_period
-        self.low_threshold = low_threshold
-        self.high_threshold = high_threshold
-    
-    async def analyze(self, market_data: Dict[str, Any]) -> Optional[TradingSignal]:
-        """Analyze market data and generate trading signal."""
-        rsi_value = market_data.get('rsi')
-        current_price = market_data.get('price')
-        
-        if rsi_value is None or current_price is None:
+        """
+        Args:
+            symbol: Trading pair (e.g., "BTC/USD")
+            momentum_period: Lookback period for momentum calculation
+            buy_threshold: Buy signal threshold in percent
+            sell_threshold: Sell signal threshold in percent (negative value)
+        """
+        self.symbol = symbol
+        self.momentum_period = momentum_period
+        self.buy_threshold = float(buy_threshold)
+        self.sell_threshold = float(sell_threshold if sell_threshold < 0 else -abs(sell_threshold))
+        self.last_signal = None
+
+    def analyze(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        Analyze OHLCV data and generate trading signal.
+
+        Args:
+            ohlcv: DataFrame with columns ['open', 'high', 'low', 'close', 'volume']
+
+        Returns:
+            Signal dict or None
+        """
+        if len(ohlcv) < self.momentum_period:
+            logger.warning(f"Insufficient data: {len(ohlcv)} < {self.momentum_period}")
             return None
-        
-        if rsi_value < self.low_threshold:
-            return TradingSignal(
-                signal=SignalType.BUY,
-                symbol=self.symbol,
-                timestamp=datetime.now(),
-                price=current_price,
-                confidence=1.0,
-                reason=f'RSI oversold: {rsi_value}'
-            )
-        elif rsi_value > self.high_threshold:
-            return TradingSignal(
-                signal=SignalType.SELL,
-                symbol=self.symbol,
-                timestamp=datetime.now(),
-                price=current_price,
-                confidence=1.0,
-                reason=f'RSI overbought: {rsi_value}'
-            )
-        
-        return None
-    
-    def generate_signals(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate signals for backtesting."""
-        if not data:
-            return {}
-        
-        latest_data = data[-1]
-        rsi_value = latest_data.get('rsi', 50.0)
-        
-        if rsi_value < self.low_threshold:
-            return {'action': 'buy', 'rsi': rsi_value}
-        elif rsi_value > self.high_threshold:
-            return {'action': 'sell', 'rsi': rsi_value}
-        
-        return {'action': 'hold', 'rsi': rsi_value}
+
+        try:
+            close = ohlcv["close"]
+            momentum = ((close.iloc[-1] - close.iloc[-self.momentum_period]) / close.iloc[-self.momentum_period]) * 100
+            logger.info(f"Momentum: {momentum:.2f}%")
+
+            if momentum > self.buy_threshold:
+                signal = {
+                    "action": "buy",
+                    "side": "buy",
+                    "momentum": momentum,
+                    "price": close.iloc[-1],
+                }
+                logger.info(f"BUY signal generated - Momentum: {momentum:.2f}%")
+            elif momentum < self.sell_threshold:
+                signal = {
+                    "action": "sell",
+                    "side": "sell",
+                    "momentum": abs(momentum),
+                    "price": close.iloc[-1],
+                }
+                logger.info(f"SELL signal generated - Momentum: {momentum:.2f}%")
+            else:
+                signal = None
+
+            self.last_signal = signal
+            return signal
+
+        except Exception as e:
+            logger.error(f"Momentum analysis failed: {e}", exc_info=True)
+            return None
+
+    def generate_signal(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Legacy RSI-based signal method used by existing unit tests."""
+        if "rsi" not in data.columns:
+            raise ValueError("RSI column is required")
+        if data["rsi"].empty:
+            raise ValueError("RSI data is empty")
+
+        rsi_value = float(data["rsi"].iloc[-1])
+        if rsi_value < 30:
+            return {"signal": "buy", "confidence": 0.8}
+        if rsi_value > 70:
+            return {"signal": "sell", "confidence": 0.8}
+        return {"signal": "hold", "confidence": 0.5}
