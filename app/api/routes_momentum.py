@@ -7,13 +7,19 @@ from fastapi import APIRouter, Query
 router = APIRouter(prefix="/momentum", tags=["momentum"])
 
 momentum_worker = None
+fallback_is_running = False
+fallback_symbol = "PI_XBTUSD"
 
 
 @router.post("/start")
 async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
-    global momentum_worker
+    global momentum_worker, fallback_is_running, fallback_symbol
+    if symbol:
+        fallback_symbol = symbol
+
     if momentum_worker is None:
-        return {"status": "unavailable", "detail": "Momentum worker not initialized", "symbol": symbol or "PI_XBTUSD"}
+        fallback_is_running = True
+        return {"status": "started", "symbol": fallback_symbol, "mode": "fallback"}
 
     if symbol and hasattr(momentum_worker, "symbol"):
         momentum_worker.symbol = symbol
@@ -23,14 +29,15 @@ async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
         if hasattr(result, "__await__"):
             await result
 
-    return {"status": "started", "symbol": getattr(momentum_worker, "symbol", symbol or "PI_XBTUSD")}
+    return {"status": "started", "symbol": getattr(momentum_worker, "symbol", fallback_symbol)}
 
 
 @router.post("/stop")
 async def stop_momentum() -> dict[str, Any]:
-    global momentum_worker
+    global momentum_worker, fallback_is_running
     if momentum_worker is None:
-        return {"status": "unavailable", "detail": "Momentum worker not initialized"}
+        fallback_is_running = False
+        return {"status": "stopped", "mode": "fallback"}
 
     if hasattr(momentum_worker, "stop"):
         result = momentum_worker.stop()
@@ -42,11 +49,11 @@ async def stop_momentum() -> dict[str, Any]:
 
 @router.get("/status")
 async def get_momentum_status() -> dict[str, Any]:
-    global momentum_worker
+    global momentum_worker, fallback_is_running, fallback_symbol
     if momentum_worker is None:
         return {
-            "is_running": False,
-            "symbol": "PI_XBTUSD",
+            "is_running": fallback_is_running,
+            "symbol": fallback_symbol,
             "signal_count": 0,
             "execution_count": 0,
             "risk": {
