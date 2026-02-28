@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
@@ -17,16 +17,13 @@ from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
 from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest, routes_webhooks, routes_momentum
-from engine.workers.momentum_worker import MomentumWorker
-from engine.core.execution_engine import ExecutionEngine
-from app.services.data_service import DataService
 
 logger = logging.getLogger(__name__)
 
 models: TradingAIModels | None = None
 manager: ConnectionManager = ConnectionManager()
 strategy_manager: StrategyManager = StrategyManager()
-momentum_worker: MomentumWorker | None = None
+momentum_worker: Any | None = None
 momentum_task: asyncio.Task | None = None
 
 # Initialize Kraken broker
@@ -57,6 +54,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Failed to initialize default strategies: %s", exc)
 
     try:
+        from app.services.data_service import DataService
+        from engine.core.execution_engine import ExecutionEngine
+        from engine.workers.momentum_worker import MomentumWorker
+
         execution_engine = ExecutionEngine(
             exchange_id="krakenfutures",
             api_key=os.getenv("KRAKEN_API_KEY", ""),
