@@ -4,6 +4,7 @@ import asyncio
 import os
 import logging
 import traceback
+import math
 from contextlib import suppress
 from typing import Any
 
@@ -29,6 +30,14 @@ def _fallback_analytics(reason: str = "Waiting for market data...") -> dict[str,
         "why_trade": reason,
         "signals": [],
     }
+
+
+def _finite_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _build_momentum_worker(symbol: str):
@@ -189,15 +198,21 @@ async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, 
             pattern_summary = "Mixed momentum and trend"
             signals = []
 
-        confidence = min(99.0, max(5.0, abs(score) * 250.0))
-        vol_forecast = float(close.pct_change().dropna().tail(60).std() * (24 * 365) ** 0.5)
+        confidence = _finite_or_none(min(99.0, max(5.0, abs(score) * 250.0)))
+        vol_forecast = _finite_or_none(close.pct_change().dropna().tail(60).std() * (24 * 365) ** 0.5)
+
+        trend_fmt = _finite_or_none(trend)
+        momentum_fmt = _finite_or_none(momentum10)
+        why_trade = "Market signal computed from trend/momentum."
+        if trend_fmt is not None and momentum_fmt is not None:
+            why_trade = f"trend={trend_fmt:.3f}% and momentum10={momentum_fmt:.3f}%"
 
         return {
             "bias": bias,
             "confidence": confidence,
             "vol_forecast": vol_forecast,
             "pattern_summary": pattern_summary,
-            "why_trade": f"trend={trend:.3f}% and momentum10={momentum10:.3f}%",
+            "why_trade": why_trade,
             "signals": signals,
         }
     except Exception as exc:
@@ -214,9 +229,11 @@ async def debug_data(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
 
         data_service = DataService(exchange_id=exchange_id)
         ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
-        latest_close = None
+        latest_close: float | None = None
         if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
-            latest_close = float(pd.to_numeric(ohlcv["close"], errors="coerce").dropna().iloc[-1])
+            close_series = pd.to_numeric(ohlcv["close"], errors="coerce").dropna()
+            if not close_series.empty:
+                latest_close = _finite_or_none(close_series.iloc[-1])
         return {
             "status": "ok",
             "symbol": symbol,
