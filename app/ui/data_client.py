@@ -3,7 +3,7 @@ import os
 from typing import Any
 
 import asyncpg
-import ccxt  # type: ignore
+import ccxt
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -110,6 +110,64 @@ def _build_exchange() -> ccxt.Exchange:
 
 def _kraken_symbol() -> str:
     return os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
+
+
+def _normalize_futures_symbol(symbol: str) -> str:
+    value = str(symbol or "").strip().upper()
+    if not value:
+        return "PF_XBTUSD"
+    if value.startswith("PI_"):
+        return value.replace("PI_", "PF_", 1)
+    if value in {"BTC/USD:USD", "XBT/USD:USD", "BTCUSD", "XBTUSD"}:
+        return "PF_XBTUSD"
+    if value == "ETH/USD:USD":
+        return "PF_ETHUSD"
+    if value == "SOL/USD:USD":
+        return "PF_SOLUSD"
+    return value
+
+
+def _coerce_candles_payload(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        candidate = payload.get("candles", payload.get("result", payload.get("data", payload)))
+    else:
+        candidate = payload
+
+    if isinstance(candidate, dict):
+        if "candles" in candidate and isinstance(candidate.get("candles"), list):
+            candidate = candidate.get("candles")
+        else:
+            candidate = [candidate]
+
+    if not isinstance(candidate, list):
+        raise ApiContractError("Contract mismatch: candle payload must be a list or object containing candles list.")
+
+    rows: list[dict[str, Any]] = []
+    for row in candidate:
+        if not isinstance(row, dict):
+            continue
+        ts = row.get("timestamp", row.get("time", row.get("ts")))
+        o = row.get("open", row.get("o"))
+        h = row.get("high", row.get("h"))
+        l = row.get("low", row.get("l"))
+        c = row.get("close", row.get("c"))
+        v = row.get("volume", row.get("v", 0.0))
+        if ts is None or o is None or h is None or l is None or c is None:
+            continue
+        rows.append(
+            {
+                "timestamp": ts,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+            }
+        )
+
+    if not rows:
+        raise ApiContractError("No valid candles found in payload.")
+    return rows
 
 
 def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
@@ -340,15 +398,28 @@ def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
         ]
         return pd.DataFrame(rows).tail(limit)
 
-    data = _get_json(f"{api_url}/momentum/history", params={"limit": limit})
-    candles = data.get("candles", data) if isinstance(data, dict) else data
-    if not isinstance(candles, list):
-        raise ApiContractError("Contract mismatch: /momentum/history must return list or {'candles': list}.")
-    df = pd.DataFrame(candles)
+    requested_symbol = _normalize_futures_symbol(os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PF_XBTUSD"))
+    candle_payload: Any = None
+    errors: list[str] = []
+    endpoints = [
+        (f"{api_url}/data/kraken/ohlcv", {"symbol": requested_symbol, "timeframe": "1m", "limit": max(50, int(limit))}),
+        (f"{api_url}/data/ohlcv", {"symbol": requested_symbol, "timeframe": "1m", "limit": max(50, int(limit))}),
+        (f"{api_url}/momentum/history", {"limit": limit}),
+    ]
+    for url, params in endpoints:
+        try:
+            candle_payload = _get_json(url, params=params)
+            candles = _coerce_candles_payload(candle_payload)
+            if candles:
+                df = pd.DataFrame(candles)
+                break
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+            continue
+    else:
+        raise ApiContractError("Unable to load candles from backend routes. " + " | ".join(errors))
+
     required = ["timestamp", "open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ApiContractError(f"Contract mismatch: /momentum/history missing columns {missing}")
     for c in ["open", "high", "low", "close", "volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
@@ -419,7 +490,7 @@ def get_backtest(api_url: str, lookback_days: int = 90) -> dict[str, Any]:
 
     data = _get_json(
         f"{api_url}/backtest/summary",
-        params={"days": int(lookback_days), "symbol": "PI_XBTUSD", "timeframe": "1h"},
+        params={"days": int(lookback_days), "symbol": "PF_XBTUSD", "timeframe": "1h"},
     )
     if not isinstance(data, dict):
         raise ApiContractError("Contract mismatch: /backtest/summary must return an object.")

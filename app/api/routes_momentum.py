@@ -221,14 +221,21 @@ async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, 
 
 
 @router.get("/debug-data")
-async def debug_data(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
+async def debug_data(symbol: str = Query("PF_XBTUSD")) -> dict[str, Any]:
     exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
 
     try:
         from app.services.data_service import DataService
 
-        data_service = DataService(exchange_id=exchange_id)
-        ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
+        try:
+            data_service = DataService(exchange_id=exchange_id)
+        except TypeError:
+            data_service = DataService()
+
+        try:
+            ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
+        except TypeError:
+            ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5)
         latest_close: float | None = None
         if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
             close_series = pd.to_numeric(ohlcv["close"], errors="coerce").dropna()

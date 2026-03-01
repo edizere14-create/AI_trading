@@ -1,60 +1,65 @@
-from typing import List, Dict
-import asyncio
+"""Market data endpoints."""
+from fastapi import APIRouter, HTTPException
+from app.services.data_service import DataService
+import logging
+import pandas as pd
 
-import numpy as np
-from fastapi import APIRouter, Query, HTTPException
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/data", tags=["data"])
 
-from app.indicators.trend import fetch_kraken_ohlcv
-from app.schemas.market_data import PriceResponse, CandleResponse
-from app.services.data_service import get_live_price
-
-router = APIRouter()
-
-# --- CoinGecko Endpoints ---
-
-@router.get("/live/{symbol}", response_model=PriceResponse)
-async def get_live_price_endpoint(symbol: str) -> PriceResponse:
-    """Get live crypto price from CoinGecko."""
-    return await get_live_price(symbol)
+data_service = DataService()
 
 
-# --- Kraken Endpoints ---
+@router.get("/ohlcv")
+async def get_ohlcv(symbol: str = "PF_XBTUSD", timeframe: str = "1m", limit: int = 100):
+    """Get OHLCV data."""
+    try:
+        data = await data_service.get_ohlcv(symbol, timeframe, limit)
+        if data is None or data.empty:
+            raise RuntimeError("empty candle response")
 
-@router.get("/data/kraken/ohlcv/ma")
-async def get_kraken_ohlcv_ma(
-    symbol: str = Query("XXBTZUSD", description="Kraken pair symbol, e.g. XXBTZUSD"),
-    interval: int = Query(60, description="Timeframe in minutes"),
-    limit: int = Query(100, description="Number of candles to fetch"),
-    window: int = Query(10, ge=1, description="Moving average window"),
-) -> List[Dict[str, float]]:
-    candles: List[Dict[str, float]] = await fetch_kraken_ohlcv(symbol, interval, limit=limit)
-    closes = np.array([c.get("close", 0.0) for c in candles], dtype=float)
+        records = data.copy()
+        records["timestamp"] = pd.to_datetime(records["timestamp"], utc=True, errors="coerce").dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"symbol": symbol, "timeframe": timeframe, "candles": records.to_dict("records")}
+    except Exception as exc:
+        logger.exception("OHLCV fetch failed for %s %s: %s", symbol, timeframe, exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch data")
 
-    if len(closes) < window:
-        raise HTTPException(status_code=400, detail="Not enough data for moving average")
 
-    ma = np.convolve(closes, np.ones(window, dtype=float) / window, mode="valid")
-    for i, v in enumerate(ma):
-        candles[i + window - 1][f"ma_{window}"] = float(v)
+@router.get("/kraken/ohlcv")
+async def get_kraken_ohlcv(symbol: str = "PF_XBTUSD", interval: str = "1m", limit: int = 100):
+    """Kraken-compatible OHLCV route for dashboard chart fallbacks."""
+    return await get_ohlcv(symbol=symbol, timeframe=interval, limit=limit)
 
-    return candles
 
-@router.get("/data/kraken/ohlcv/multi")
-async def get_kraken_ohlcv_multi(
-    symbols: List[str] = Query(["XXBTZUSD", "XETHZUSD"], description="List of Kraken pair symbols"),
-    interval: int = Query(60, description="Timeframe in minutes"),
-    limit: int = Query(100, description="Number of candles to fetch"),
-) -> Dict[str, List[Dict[str, float]]]:
-    results = await asyncio.gather(
-        *(fetch_kraken_ohlcv(s, interval, limit=limit) for s in symbols)
-    )
-    return dict(zip(symbols, results))
+@router.get("/live/{symbol}")
+async def get_live_symbol(symbol: str):
+    """Get latest live price for a symbol."""
+    try:
+        price = await data_service.get_live_price(symbol)
+        return {
+            "symbol": symbol,
+            "price": float(price.price),
+            "timestamp": price.timestamp.isoformat(),
+        }
+    except Exception as exc:
+        logger.exception("Live price fetch failed for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch live data")
 
-@router.get("/data/kraken/ohlcv")
-async def get_kraken_ohlcv(
-    symbol: str = Query("XXBTZUSD", description="Kraken pair symbol, e.g. XXBTZUSD"),
-    interval: int = Query(60, description="Timeframe in minutes"),
-    limit: int = Query(100, description="Number of candles to fetch"),
-) -> List[Dict[str, float]]:
-    candles: List[Dict[str, float]] = await fetch_kraken_ohlcv(symbol, interval, limit=limit)
-    return candles
+
+@router.get("/ticker")
+async def get_ticker(symbol: str = "BTC/USD"):
+    """Get ticker data."""
+    ticker = await data_service.get_ticker(symbol)
+    if ticker is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch ticker")
+    return ticker
+
+
+@router.get("/orderbook")
+async def get_orderbook(symbol: str = "BTC/USD", limit: int = 20):
+    """Get order book."""
+    book = await data_service.get_order_book(symbol, limit)
+    if book is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch order book")
+    return book

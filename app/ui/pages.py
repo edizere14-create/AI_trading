@@ -339,12 +339,19 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
     with mid:
         st.subheader("AI Insight Panel")
         risk_preview = risk_preview or {}
-        configured_symbol = str(risk_preview.get("symbol", "PI_XBTUSD") or "PI_XBTUSD").strip()
-        preview_symbol = configured_symbol if configured_symbol else "PI_XBTUSD"
+        configured_symbol = str(risk_preview.get("symbol", "PF_XBTUSD") or "PF_XBTUSD").strip().upper()
+        if configured_symbol.startswith("PI_"):
+            configured_symbol = configured_symbol.replace("PI_", "PF_", 1)
+        preview_symbol = configured_symbol if configured_symbol else "PF_XBTUSD"
         configured_asset = str(risk_preview.get("bucket_asset", "BTC") or "BTC").strip().upper()
         preview_bucket_asset = configured_asset if configured_asset else "BTC"
         preview_bucket_limit = float(risk_preview.get("bucket_limit_pct", 0.60) or 0.60)
         preview_quantity = float(risk_preview.get("quantity", 1.0) or 1.0)
+        collateral_assets_raw = str(risk_preview.get("collateral_assets", "USDT") or "USDT")
+        collateral_assets = [asset.strip().upper() for asset in collateral_assets_raw.split(",") if asset.strip()]
+        if not collateral_assets:
+            collateral_assets = ["USDT"]
+        collateral_total_usd = float(risk_preview.get("collateral_total_usd", 3000.0) or 3000.0)
         confidence_value = ai.get("confidence")
         confidence_text = "N/A" if confidence_value in (None, "") else f"{float(str(confidence_value)):.2f}%"
         vol_forecast_value = ai.get("vol_forecast")
@@ -373,6 +380,11 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
             else:
                 st.error(f"Execution Decision: {reasoning['go_nogo']} — {reasoning.get('go_nogo_reason', '')}")
             st.markdown(f"**Decision Logic:** {reasoning['headline']}")
+            action_items = reasoning.get("actions", [])
+            if isinstance(action_items, list) and action_items:
+                st.markdown("**No-Trade Actions:**")
+                for item in action_items:
+                    st.caption(f"• {item}")
 
             provided_why = str(ai.get("why", "") or "").strip()
             if provided_why:
@@ -480,11 +492,12 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                     "equity": None,
                     "collateral_balances": [
                         {
-                            "asset": "USDT",
-                            "amount": max(float(metrics.get("total_equity", 0.0) or 0.0), 1000.0),
+                            "asset": asset,
+                            "amount": max(collateral_total_usd / max(1, len(collateral_assets)), 1.0),
                             "usd_price": 1.0,
                             "haircut_pct": 0.0,
                         }
+                        for asset in collateral_assets
                     ],
                     "symbol_collateral_map": {preview_symbol: preview_bucket_asset},
                     "collateral_bucket_exposure_limits": {preview_bucket_asset: preview_bucket_limit},
