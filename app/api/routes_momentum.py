@@ -232,10 +232,19 @@ async def debug_data(symbol: str = Query("PF_XBTUSD")) -> dict[str, Any]:
         except TypeError:
             data_service = DataService()
 
-        try:
-            ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
-        except TypeError:
-            ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5)
+        if hasattr(data_service, "get_ohlcv"):
+            try:
+                ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
+            except TypeError:
+                ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5)
+        else:
+            return {
+                "status": "degraded",
+                "symbol": symbol,
+                "rows": 0,
+                "latest_close": None,
+                "warning": "DataService missing get_ohlcv",
+            }
         latest_close: float | None = None
         if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
             close_series = pd.to_numeric(ohlcv["close"], errors="coerce").dropna()
