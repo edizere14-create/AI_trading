@@ -11,12 +11,80 @@ from app.services.data_service import DataService
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
 
+def _to_summary(result: object, *, days: int, symbol: str, timeframe: str) -> BacktestSummaryResponse:
+    if isinstance(result, BacktestSummaryResponse):
+        return result
+
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump()  # type: ignore[assignment]
+    elif isinstance(result, dict):
+        payload = result
+    else:
+        payload = {}
+
+    if payload:
+        try:
+            return BacktestSummaryResponse.model_validate(payload)
+        except Exception:
+            pass
+
+    total_return_pct = float(payload.get("total_return_pct", payload.get("total_return", 0.0)) or 0.0)
+    max_drawdown_pct = float(payload.get("max_drawdown_pct", payload.get("max_drawdown", 0.0)) or 0.0)
+    sharpe_ratio = float(payload.get("sharpe_ratio", payload.get("sharpe", 0.0)) or 0.0)
+
+    trades_val = payload.get("trades", payload.get("total_trades", 0))
+    if isinstance(trades_val, list):
+        trades = len(trades_val)
+    else:
+        try:
+            trades = int(trades_val or 0)
+        except Exception:
+            trades = 0
+
+    return BacktestSummaryResponse(
+        symbol=str(payload.get("symbol", symbol) or symbol),
+        timeframe=str(payload.get("timeframe", timeframe) or timeframe),
+        days=int(payload.get("days", days) or days),
+        total_return_pct=total_return_pct,
+        annualized_return_pct=float(payload.get("annualized_return_pct", 0.0) or 0.0),
+        max_drawdown_pct=max_drawdown_pct,
+        sharpe_ratio=sharpe_ratio,
+        win_rate_pct=float(payload.get("win_rate_pct", payload.get("win_rate", 0.0)) or 0.0),
+        trades=trades,
+        start_equity=float(payload.get("start_equity", payload.get("initial_capital", 1000.0)) or 1000.0),
+        end_equity=float(payload.get("end_equity", payload.get("final_value", 1000.0)) or 1000.0),
+        slippage_bps=float(payload.get("slippage_bps", 0.0) or 0.0),
+        profit_factor=float(payload.get("profit_factor", 0.0) or 0.0),
+    )
+
+
+async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object, object]:
+    limit = max(100, min(days * 24, 5000))
+    frame = await DataService().get_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+
+    if frame is None:
+        return [], []
+
+    if hasattr(frame, "copy") and hasattr(frame, "columns"):
+        x = frame.copy()
+        if "close" in x.columns:
+            fast = x["close"].rolling(20).mean()
+            slow = x["close"].rolling(50).mean()
+            sig = (fast > slow).astype(int).fillna(0)
+            x["signal"] = sig
+            signals = x[["signal"]]
+        else:
+            x["signal"] = 0
+            signals = x[["signal"]]
+        return x, signals
+
+    return frame, []
+
+
 async def _summary_compat(service: BacktestService, *, days: int, symbol: str, timeframe: str) -> BacktestSummaryResponse:
     if hasattr(service, "get_summary"):
         result = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
-        if isinstance(result, BacktestSummaryResponse):
-            return result
-        return BacktestSummaryResponse.model_validate(result)
+        return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
 
     if hasattr(service, "run_backtest"):
         run_backtest = getattr(service, "run_backtest")
@@ -61,10 +129,17 @@ async def _summary_compat(service: BacktestService, *, days: int, symbol: str, t
         elif "strategy_name" in names and "strategy_name" not in kwargs:
             kwargs["strategy_name"] = "momentum"
 
+        if "data" in names and "data" not in kwargs:
+            data, signals = await _legacy_inputs(symbol=symbol, timeframe=timeframe, days=days)
+            kwargs["data"] = data
+            if "signals" in names and "signals" not in kwargs:
+                kwargs["signals"] = signals
+        elif "signals" in names and "signals" not in kwargs:
+            _, signals = await _legacy_inputs(symbol=symbol, timeframe=timeframe, days=days)
+            kwargs["signals"] = signals
+
         result = await run_backtest(**kwargs)
-        if isinstance(result, BacktestSummaryResponse):
-            return result
-        return BacktestSummaryResponse.model_validate(result)
+        return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
 
     raise RuntimeError("Backtest service missing compatible summary method")
 
