@@ -234,7 +234,12 @@ async def backtest_summary(
         service = BacktestService(DataService())
         return await _summary_compat(service, days=days, symbol=symbol, timeframe=timeframe)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
+        return BacktestSummaryResponse(
+            symbol=symbol,
+            timeframe=timeframe,
+            days=days,
+            analytics=BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days),
+        )
 
 
 @router.get(
@@ -306,4 +311,4 @@ async def backtest_analytics(
             monthly_performance=summary.monthly_performance,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Backtest analytics failed: {exc}") from exc
+        return BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days)
