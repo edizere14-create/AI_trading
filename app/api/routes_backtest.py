@@ -66,8 +66,6 @@ async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object
     frame = None
     if hasattr(service, "get_ohlcv"):
         frame = await service.get_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
-    elif hasattr(service, "get_historical_candles"):
-        frame = await service.get_historical_candles(symbol=symbol, days=max(1, int(days)))
 
     if frame is None:
         now = datetime.now(timezone.utc)
@@ -87,7 +85,19 @@ async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object
                     "volume": 1.0,
                 }
             )
-        frame = candles
+        try:
+            import pandas as pd  # local import for optional compatibility
+
+            frame = pd.DataFrame(candles)
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+            frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+            frame = frame.dropna(subset=["timestamp", "close"]).reset_index(drop=True)
+            fast = frame["close"].rolling(20).mean()
+            slow = frame["close"].rolling(50).mean()
+            frame["signal"] = (fast > slow).astype(int).fillna(0)
+            return frame, frame[["signal"]]
+        except Exception:
+            frame = candles
 
     if hasattr(frame, "copy") and hasattr(frame, "columns"):
         x = frame.copy()
