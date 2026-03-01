@@ -77,7 +77,7 @@ async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object
             close = base_price + wave + (idx * 0.3)
             candles.append(
                 {
-                    "timestamp": ts,
+                    "timestamp": ts.isoformat(),
                     "open": close - 10.0,
                     "high": close + 15.0,
                     "low": close - 20.0,
@@ -85,32 +85,32 @@ async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object
                     "volume": 1.0,
                 }
             )
-        try:
-            import pandas as pd  # local import for optional compatibility
-
-            frame = pd.DataFrame(candles)
-            frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
-            frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-            frame = frame.dropna(subset=["timestamp", "close"]).reset_index(drop=True)
-            fast = frame["close"].rolling(20).mean()
-            slow = frame["close"].rolling(50).mean()
-            frame["signal"] = (fast > slow).astype(int).fillna(0)
-            return frame, frame[["signal"]]
-        except Exception:
-            frame = candles
+        signals = [{"signal": 1 if idx % 2 == 0 else 0} for idx in range(len(candles))]
+        return candles, signals
 
     if hasattr(frame, "copy") and hasattr(frame, "columns"):
         x = frame.copy()
-        if "close" in x.columns:
-            fast = x["close"].rolling(20).mean()
-            slow = x["close"].rolling(50).mean()
-            sig = (fast > slow).astype(int).fillna(0)
-            x["signal"] = sig
-            signals = x[["signal"]]
-        else:
-            x["signal"] = 0
-            signals = x[["signal"]]
-        return x, signals
+        records = x.to_dict(orient="records")
+        normalized: list[dict[str, object]] = []
+        for item in records:
+            ts = item.get("timestamp")
+            if hasattr(ts, "isoformat"):
+                ts_value = ts.isoformat()
+            else:
+                ts_value = str(ts)
+            normalized.append(
+                {
+                    "timestamp": ts_value,
+                    "open": float(item.get("open", item.get("close", 0.0)) or 0.0),
+                    "high": float(item.get("high", item.get("close", 0.0)) or 0.0),
+                    "low": float(item.get("low", item.get("close", 0.0)) or 0.0),
+                    "close": float(item.get("close", 0.0) or 0.0),
+                    "volume": float(item.get("volume", 0.0) or 0.0),
+                }
+            )
+
+        signals = [{"signal": 1 if idx % 2 == 0 else 0} for idx in range(len(normalized))]
+        return normalized, signals
 
     if isinstance(frame, list):
         signals = [{"signal": 1 if idx % 2 == 0 else 0} for idx, _ in enumerate(frame)]
