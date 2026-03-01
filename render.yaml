@@ -34,7 +34,6 @@ services:
     env: python
     plan: free
     branch: streamlit-deploy
-    rootDir: cloud_streamlit
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
@@ -42,5 +41,7 @@ services:
     envVars:
       - key: API_BASE_URL
         value: https://ai-trading-1-dwvg.onrender.com
+      - key: STREAMLIT_APP_MODE
+        value: backend-api
       - key: PYTHON_VERSION
         value: 3.13.11
