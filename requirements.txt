@@ -10,6 +10,7 @@ asyncpg==0.30.0
 
 # Data Validation
 pydantic==2.9.2
+pydantic-settings==2.5.2
 
 # ML & Data
 # TensorFlow wheels are not available on Python 3.13 in Render's runtime.
