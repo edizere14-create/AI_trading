@@ -8,6 +8,22 @@ from app.services.data_service import DataService
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
 
+async def _summary_compat(service: BacktestService, *, days: int, symbol: str, timeframe: str) -> BacktestSummaryResponse:
+    if hasattr(service, "get_summary"):
+        result = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+        if isinstance(result, BacktestSummaryResponse):
+            return result
+        return BacktestSummaryResponse.model_validate(result)
+
+    if hasattr(service, "run_backtest"):
+        result = await service.run_backtest(days=days, symbol=symbol, timeframe=timeframe)
+        if isinstance(result, BacktestSummaryResponse):
+            return result
+        return BacktestSummaryResponse.model_validate(result)
+
+    raise RuntimeError("Backtest service missing compatible summary method")
+
+
 @router.get(
     "/summary",
     response_model=BacktestSummaryResponse,
@@ -45,7 +61,7 @@ async def backtest_summary(
 ) -> BacktestSummaryResponse:
     try:
         service = BacktestService(DataService())
-        return await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+        return await _summary_compat(service, days=days, symbol=symbol, timeframe=timeframe)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
 
@@ -96,7 +112,7 @@ async def backtest_analytics(
 ) -> BacktestAnalytics:
     try:
         service = BacktestService(DataService())
-        summary = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+        summary = await _summary_compat(service, days=days, symbol=symbol, timeframe=timeframe)
         if summary.analytics is not None:
             return summary.analytics
 
