@@ -156,12 +156,12 @@ async def get_momentum_history(limit: int = Query(50, ge=1, le=500)) -> dict[str
 
 @router.get("/analytics")
 async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
-    from app.services.data_service import DataService
-
     exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
-    data_service = DataService(exchange_id=exchange_id)
 
     try:
+        from app.services.data_service import DataService
+
+        data_service = DataService(exchange_id=exchange_id)
         candles = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=120, exchange_id=exchange_id)
         if candles is None or candles.empty:
             return _fallback_analytics("No market data returned.")
@@ -207,12 +207,12 @@ async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, 
 
 @router.get("/debug-data")
 async def debug_data(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
-    from app.services.data_service import DataService
-
     exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
-    data_service = DataService(exchange_id=exchange_id)
 
     try:
+        from app.services.data_service import DataService
+
+        data_service = DataService(exchange_id=exchange_id)
         ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
         latest_close = None
         if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
