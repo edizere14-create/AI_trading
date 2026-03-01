@@ -110,9 +110,14 @@ async def _legacy_inputs(symbol: str, timeframe: str, days: int) -> tuple[object
 
 
 async def _summary_compat(service: BacktestService, *, days: int, symbol: str, timeframe: str) -> BacktestSummaryResponse:
+    last_error: Exception | None = None
+
     if hasattr(service, "get_summary"):
-        result = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
-        return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
+        try:
+            result = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+            return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
+        except Exception as exc:
+            last_error = exc
 
     if hasattr(service, "run_backtest"):
         run_backtest = getattr(service, "run_backtest")
@@ -166,8 +171,16 @@ async def _summary_compat(service: BacktestService, *, days: int, symbol: str, t
             _, signals = await _legacy_inputs(symbol=symbol, timeframe=timeframe, days=days)
             kwargs["signals"] = signals
 
-        result = await run_backtest(**kwargs)
-        return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
+        try:
+            result = await run_backtest(**kwargs)
+            return _to_summary(result, days=days, symbol=symbol, timeframe=timeframe)
+        except Exception as exc:
+            if last_error is not None:
+                raise RuntimeError(f"get_summary error: {last_error}; run_backtest error: {exc}") from exc
+            raise
+
+    if last_error is not None:
+        raise RuntimeError(f"Backtest service summary failed: {last_error}") from last_error
 
     raise RuntimeError("Backtest service missing compatible summary method")
 
