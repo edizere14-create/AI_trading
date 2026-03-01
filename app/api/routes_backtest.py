@@ -1,85 +1,122 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from sqlalchemy.orm import Session
-from typing import Optional
-from datetime import datetime
-import pandas as pd
-import logging
+"""Backtest endpoints."""
+from fastapi import APIRouter, HTTPException, Query
 
+from app.schemas.backtest import BacktestSummaryResponse, BacktestAnalytics
 from app.services.backtest_service import BacktestService
-from app.services.ml_signal_service import MLSignalService
 from app.services.data_service import DataService
-from app.schemas.backtest import BacktestRequest, BacktestResponse
-from app.db.database import get_db  # Import your DB dependency
 
-logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/backtest", tags=["Backtest"])
 
-router = APIRouter(prefix="/backtest", tags=["Backtesting"])
 
-@router.post("/run", response_model=BacktestResponse)
-async def run_backtest(
-    request: BacktestRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)  # Use Depends() for injection
-):
-    """Run ML-enhanced backtest"""
+@router.get(
+    "/summary",
+    response_model=BacktestSummaryResponse,
+    summary="Backtest summary",
+    description="Runs historical simulation and returns summary metrics plus curves/tables.",
+    responses={
+        200: {
+            "description": "Backtest summary payload",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "symbol": "PI_XBTUSD",
+                        "timeframe": "1h",
+                        "days": 90,
+                        "total_return_pct": 12.4,
+                        "annualized_return_pct": 62.3,
+                        "max_drawdown_pct": -8.7,
+                        "sharpe_ratio": 1.15,
+                        "win_rate_pct": 53.4,
+                        "trades": 42,
+                        "start_equity": 1000.0,
+                        "end_equity": 1124.0,
+                        "slippage_bps": 2.5,
+                        "profit_factor": 1.21,
+                    }
+                }
+            },
+        }
+    },
+)
+async def backtest_summary(
+    days: int = Query(default=90, ge=7, le=365, description="Lookback window in days", examples=[90]),
+    symbol: str = Query(default="PI_XBTUSD", description="Market symbol", examples=["PI_XBTUSD"]),
+    timeframe: str = Query(default="1h", description="Bar timeframe", examples=["1h"]),
+) -> BacktestSummaryResponse:
     try:
-        # Get market data
-        data_service = DataService()
-        data = await data_service.get_historical_data(
-            request.symbol,
-            request.start_date,
-            request.end_date,
-            '1d'
-        )
-        
-        # Generate ML signals
-        ml_service = MLSignalService()
-        signals = ml_service.generate_signals(data)
-        
-        # Run backtest
-        backtest_service = BacktestService(db)
-        metrics = backtest_service.run_backtest(
-            request.symbol,
-            request.start_date,
-            request.end_date,
-            data,
-            signals,
-            request.initial_capital
-        )
-        
-        # Save to database
-        background_tasks.add_task(
-            _save_backtest_results,
-            db,
-            request.symbol,
-            metrics
-        )
-        
-        return BacktestResponse(**metrics)
-        
-    except Exception as e:
-        logger.error(f"Backtest failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        service = BacktestService(DataService())
+        return await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
 
 
-async def _save_backtest_results(db: Session, symbol: str, metrics: dict):
-    """Background task to save results"""
-    from app.db.models import BacktestResult
-    
-    result = BacktestResult(
-        symbol=symbol,
-        strategy_name="ML-Enhanced",
-        start_date=metrics['start_date'],
-        end_date=metrics['end_date'],
-        initial_capital=metrics.get('initial_capital', 10000),
-        final_value=metrics['final_value'],
-        total_return=metrics['total_return'],
-        sharpe_ratio=metrics['sharpe_ratio'],
-        max_drawdown=metrics['max_drawdown'],
-        total_trades=metrics['total_trades'],
-        win_rate=metrics['win_rate'],
-        profit_factor=metrics['profit_factor'],
-    )
-    
-    db.add(result)
-    db.commit()
+@router.get(
+    "/analytics",
+    response_model=BacktestAnalytics,
+    summary="Backtest analytics",
+    description="Returns structured analytics including monthly performance and drawdown curve.",
+    responses={
+        200: {
+            "description": "Structured analytics payload",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "symbol": "PI_XBTUSD",
+                        "timeframe": "1h",
+                        "days": 90,
+                        "total_return_pct": 12.4,
+                        "annualized_return_pct": 62.3,
+                        "max_drawdown_pct": -8.7,
+                        "sharpe_ratio": 1.15,
+                        "win_rate_pct": 53.4,
+                        "profit_factor": 1.21,
+                        "trades": 42,
+                        "slippage_bps": 2.5,
+                        "start_equity": 1000.0,
+                        "end_equity": 1124.0,
+                        "monthly_performance": [
+                            {
+                                "month": "2026-01",
+                                "return_pct": 4.2,
+                                "start_equity": 1000.0,
+                                "end_equity": 1042.0,
+                                "trades": 12,
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+    },
+)
+async def backtest_analytics(
+    days: int = Query(default=90, ge=7, le=365, description="Lookback window in days", examples=[90]),
+    symbol: str = Query(default="PI_XBTUSD", description="Market symbol", examples=["PI_XBTUSD"]),
+    timeframe: str = Query(default="1h", description="Bar timeframe", examples=["1h"]),
+) -> BacktestAnalytics:
+    try:
+        service = BacktestService(DataService())
+        summary = await service.get_summary(days=days, symbol=symbol, timeframe=timeframe)
+        if summary.analytics is not None:
+            return summary.analytics
+
+        return BacktestAnalytics(
+            symbol=summary.symbol,
+            timeframe=summary.timeframe,
+            days=summary.days,
+            total_return_pct=summary.total_return_pct,
+            annualized_return_pct=summary.annualized_return_pct,
+            max_drawdown_pct=summary.max_drawdown_pct,
+            sharpe_ratio=summary.sharpe_ratio,
+            win_rate_pct=summary.win_rate_pct,
+            profit_factor=summary.profit_factor,
+            trades=summary.trades,
+            slippage_bps=summary.slippage_bps,
+            start_equity=summary.start_equity,
+            end_equity=summary.end_equity,
+            equity_curve=summary.equity_curve,
+            drawdown_curve=summary.drawdown_curve,
+            monthly_performance=summary.monthly_performance,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backtest analytics failed: {exc}") from exc
