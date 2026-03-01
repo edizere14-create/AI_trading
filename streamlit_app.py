@@ -1,123 +1,132 @@
-
-"""Streamlit dashboard for monitoring momentum demo trading."""
+"""
+Advanced Institutional Dashboard for Momentum Trading.
+Combines Real-time Monitoring, Portfolio Analytics, and Signal Execution.
+"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
+import os
 
-import pandas as pd
-import requests
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
-# Remove plotly import - use built-in Streamlit charts instead
-DEFAULT_API_URL = "http://localhost:8000"
+from app.core.config import settings
+from app.services.ws_client import get_price_stream
+from app.ui.pages import render_dashboard, render_portfolio, render_backtesting
+from app.ui.data_client import ApiContractError, emergency_close_all_positions, get_account_balance, open_trade, add_paper_trade
+from app.ui.theme import apply_theme
 
+st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
+apply_theme()
 
-def api_get(base_url: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    response = requests.get(f"{base_url}{path}", params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Go to",
+    ["Dashboard", "Portfolio Overview", "Backtesting Dashboard"],
+    index=0,
+)
 
+settings_obj = cast(Any, settings)
+default_api_url = str(getattr(settings_obj, "api_base_url", "https://ai-trading-dashboard-v5dp.onrender.com"))
+default_ws_url = str(getattr(settings_obj, "ws_url", "ws://127.0.0.1:8000/ws/price"))
 
-def api_post(base_url: str, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    response = requests.post(f"{base_url}{path}", params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+default_mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
+mode_index = 0 if default_mode in {"all-in-one", "direct"} else 1
+mode = st.sidebar.radio("App Mode", ["All-in-One", "Backend API"], index=mode_index)
 
-
-def safe_request(fn, *args, **kwargs) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        return fn(*args, **kwargs), None
-    except requests.RequestException as exc:
-        return None, str(exc)
-
-
-st.set_page_config(page_title="Trading Monitor", layout="wide")
-st.title("Kraken Futures Demo Monitor")
-
-with st.sidebar:
-    st.header("Settings")
-    api_url = st.text_input("API URL", value=DEFAULT_API_URL).rstrip("/")
-    symbol = st.text_input("Symbol", value="PI_XBTUSD")
-    history_limit = st.slider("History Rows", min_value=10, max_value=200, value=50, step=10)
-    auto_refresh = st.checkbox("Auto-refresh (10s)", value=False)
-    if st.button("Refresh Now", use_container_width=True):
-        st.rerun()
-
-# Fetch data
-health, health_err = safe_request(api_get, api_url, "/health")
-status, status_err = safe_request(api_get, api_url, "/momentum/status")
-history, history_err = safe_request(api_get, api_url, "/momentum/history", {"limit": history_limit})
-
-# Worker controls
-st.subheader("Worker Control")
-control_col1, control_col2 = st.columns(2)
-is_running = bool(status and status.get("is_running"))
-
-with control_col1:
-    if st.button("Start Worker", use_container_width=True, disabled=is_running):
-        data, err = safe_request(api_post, api_url, "/momentum/start", {"symbol": symbol})
-        if err:
-            st.error(f"Start failed: {err}")
-        else:
-            st.success(f"✅ {data}")
-
-with control_col2:
-    if st.button("Stop Worker", use_container_width=True, disabled=not is_running):
-        data, err = safe_request(api_post, api_url, "/momentum/stop")
-        if err:
-            st.error(f"Stop failed: {err}")
-        else:
-            st.warning(f"⏹️ {data}")
-
-if health_err:
-    st.error(f"❌ Health check failed: {health_err}")
-if status_err:
-    st.error(f"❌ Status check failed: {status_err}")
-
-if not status:
-    st.stop()
-
-# Metrics
-risk = status.get("risk", {})
-kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
-kpi1.metric("Worker", "🟢 Running" if is_running else "🔴 Stopped")
-kpi2.metric("Symbol", status.get("symbol", "-"))
-kpi3.metric("Signals", int(status.get("signal_count", 0)))
-kpi4.metric("Executions", int(status.get("execution_count", 0)))
-kpi5.metric("Open Positions", int(risk.get("open_positions", 0)))
-
-st.subheader("Risk Snapshot")
-r1, r2, r3, r4 = st.columns(4)
-r1.metric("Account Balance", f"${risk.get('account_balance', 0):,.2f}")
-r2.metric("Drawdown %", f"{risk.get('drawdown_pct', 0):.2f}%")
-r3.metric("Daily Loss", f"${risk.get('daily_loss', 0):,.2f}")
-r4.metric("Total PnL", f"${risk.get('total_pnl', 0):,.2f}")
-
-# Signals table
-st.subheader("Recent Signals")
-signals = (history or {}).get("signals", [])
-if not signals:
-    st.info("No signals yet.")
+if mode == "All-in-One":
+    symbol = os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
+    api_url = "all-in-one"
+    ws_url = f"kraken://{symbol}"
+    st.sidebar.caption("Using direct PostgreSQL + Kraken Futures connections.")
 else:
-    df = pd.DataFrame(signals)
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.sort_values("timestamp", ascending=False)
-    
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    
-    # Momentum chart
-    if {"timestamp", "momentum"}.issubset(df.columns):
-        chart_df = df.dropna(subset=["timestamp", "momentum"]).sort_values("timestamp")
-        if not chart_df.empty:
-            st.subheader("Momentum Trend")
-            st.line_chart(chart_df.set_index("timestamp")["momentum"], use_container_width=True)
+    api_url = st.sidebar.text_input("Backend URL", default_api_url)
+    ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 
-st.caption(f"Last refresh: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+refresh_sec = st.sidebar.slider("Refresh (sec)", 1, 30, 2)
 
-# Auto-refresh
-if auto_refresh:
-    import time
-    time.sleep(10)
-    st.rerun()
+st.sidebar.markdown("---")
+st.sidebar.subheader("Risk Preview")
+preview_symbol = st.sidebar.text_input("Preview Symbol", "PI_XBTUSD")
+preview_bucket_asset = st.sidebar.text_input("Bucket Asset", "BTC")
+preview_bucket_limit_pct = st.sidebar.slider("Bucket Limit %", 10.0, 100.0, 60.0, 1.0)
+preview_quantity = st.sidebar.number_input("Preview Quantity", min_value=0.1, value=1.0, step=0.1)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Emergency Controls")
+
+try:
+    st.session_state.balance = float(get_account_balance(api_url))
+except ApiContractError:
+    st.session_state.balance = float(st.session_state.get("balance", 0.0) or 0.0)
+
+st.sidebar.metric("Balance", f"${float(st.session_state.balance):,.2f}")
+LIVE_TRADING = st.sidebar.toggle("LIVE TRADING", value=False)
+
+if st.sidebar.button("🟢 LONG", use_container_width=True) and LIVE_TRADING:
+    if float(st.session_state.balance) > 100:
+        try:
+            order = open_trade(api_url, "buy", amount=float(preview_quantity))
+            st.sidebar.success(f"LONG submitted: {order.get('order_id', 'accepted')}")
+        except ApiContractError as exc:
+            st.sidebar.error(str(exc))
+    else:
+        st.sidebar.error("⚠️ Insufficient balance")
+
+if st.sidebar.button("🔴 SHORT (LIVE)", use_container_width=True) and LIVE_TRADING:
+    if float(st.session_state.balance) > 100:
+        try:
+            order = open_trade(api_url, "sell", amount=float(preview_quantity))
+            st.sidebar.success(f"SHORT submitted: {order.get('order_id', 'accepted')}")
+        except ApiContractError as exc:
+            st.sidebar.error(str(exc))
+    else:
+        st.sidebar.error("⚠️ Insufficient balance")
+
+confirm_emergency_close = st.sidebar.checkbox("Confirm emergency close-all")
+if st.sidebar.button("Close All Positions", type="primary", use_container_width=True):
+    if not confirm_emergency_close:
+        st.sidebar.error("Enable confirmation to proceed.")
+    else:
+        try:
+            close_result = emergency_close_all_positions(api_url)
+            closed_count = int(close_result.get("closed_count", 0) or 0)
+            if closed_count > 0:
+                st.sidebar.success(f"Closed {closed_count} position(s).")
+            else:
+                st.sidebar.info(str(close_result.get("detail", "No open positions.")))
+        except ApiContractError as exc:
+            st.sidebar.error(str(exc))
+
+st_autorefresh(interval=refresh_sec * 1000, key="ui_refresh")
+
+stream = get_price_stream(ws_url)
+stream.start()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Paper Test")
+if st.sidebar.button("🧪 PAPER LONG", use_container_width=True):
+    paper_symbol = os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
+    paper_price = float(stream.latest.price) if float(stream.latest.price) > 0 else 0.0
+    paper_size = float(os.getenv("KRAKEN_ORDER_SIZE", "1.0") or 1.0)
+    try:
+        trade = add_paper_trade("buy", paper_symbol, paper_size, paper_price)
+        st.sidebar.success(f"Paper LONG added: {trade.get('symbol')}")
+    except ApiContractError as exc:
+        st.sidebar.error(str(exc))
+
+if page == "Dashboard":
+    render_dashboard(
+        api_url=api_url,
+        stream=stream,
+        risk_preview={
+            "symbol": preview_symbol,
+            "bucket_asset": preview_bucket_asset,
+            "bucket_limit_pct": preview_bucket_limit_pct / 100.0,
+            "quantity": float(preview_quantity),
+        },
+    )
+elif page == "Portfolio Overview":
+    render_portfolio(api_url=api_url)
+else:
+    render_backtesting(api_url=api_url)

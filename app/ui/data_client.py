@@ -1,0 +1,558 @@
+import asyncio
+import os
+from typing import Any
+
+import asyncpg
+import ccxt  # type: ignore
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+HTTP_TIMEOUT = 8
+
+
+class ApiContractError(RuntimeError):
+    pass
+
+
+def _paper_positions_df() -> pd.DataFrame:
+    try:
+        import streamlit as st
+
+        rows = st.session_state.get("paper_positions", [])
+        if not isinstance(rows, list) or not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+def add_paper_trade(side: str, symbol: str, quantity: float, entry_price: float) -> dict[str, Any]:
+    normalized_side = str(side or "").strip().lower()
+    if normalized_side not in {"buy", "sell"}:
+        raise ApiContractError("side must be 'buy' or 'sell'.")
+    try:
+        import streamlit as st
+    except Exception as e:
+        raise ApiContractError(f"Paper trade unavailable: {e}") from e
+
+    rows = st.session_state.get("paper_positions", [])
+    if not isinstance(rows, list):
+        rows = []
+
+    row = {
+        "symbol": symbol,
+        "side": normalized_side,
+        "quantity": float(quantity),
+        "entry_price": float(entry_price),
+        "current_price": float(entry_price),
+        "unrealized_pnl": 0.0,
+        "leverage": 1.0,
+        "source": "paper",
+    }
+    rows.append(row)
+    st.session_state["paper_positions"] = rows
+    return row
+
+
+def _all_in_one_enabled(api_url: str) -> bool:
+    mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
+    return mode in {"all-in-one", "direct"} or api_url.strip().lower() in {"all-in-one", "direct"}
+
+
+def _database_url() -> str:
+    url = os.getenv("DATABASE_URL", "").strip()
+    if not url:
+        raise ApiContractError("DATABASE_URL is not set.")
+    return url
+
+
+def _run_async(coro: Any) -> Any:
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+async def _db_fetch(query: str, *params: Any) -> list[dict[str, Any]]:
+    conn = await asyncpg.connect(_database_url())
+    try:
+        rows = await conn.fetch(query, *params)
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+def _build_exchange() -> ccxt.Exchange:
+    api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+    api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+    if not api_key or not api_secret:
+        raise ApiContractError("KRAKEN_API_KEY/KRAKEN_API_SECRET must be set for all-in-one mode.")
+
+    exchange = ccxt.krakenfutures(
+        {
+            "apiKey": api_key,
+            "secret": api_secret,
+            "enableRateLimit": True,
+            "timeout": 30000,
+        }
+    )
+    demo = os.getenv("KRAKEN_FUTURES_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
+    exchange.set_sandbox_mode(demo)
+    return exchange
+
+
+def _kraken_symbol() -> str:
+    return os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
+
+
+def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
+    try:
+        r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise ApiContractError(f"API request failed: {url} -> {e}") from e
+
+
+def _post_json(url: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> Any:
+    try:
+        r = requests.post(url, json=body, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise ApiContractError(f"API request failed: {url} -> {e}") from e
+
+
+def get_metrics(api_url: str) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        exchange = _build_exchange()
+        symbol = _kraken_symbol()
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            last = float(ticker.get("last") or 0.0)
+        except Exception:
+            last = 0.0
+
+        equity = 0.0
+        try:
+            balance = exchange.fetch_balance()
+            usd_like = ["USD", "USDT", "USDC"]
+            for asset in usd_like:
+                equity += float((balance.get("total", {}) or {}).get(asset, 0.0) or 0.0)
+            if equity <= 0:
+                equity = float((balance.get("total", {}) or {}).get("ZUSD", 0.0) or 0.0)
+        except Exception:
+            equity = 0.0
+
+        ai = get_ai_insight(api_url)
+        trades = get_active_trades(api_url)
+        exposure = 0.0
+        if not trades.empty and {"quantity", "entry_price"}.issubset(trades.columns):
+            notionals = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
+                trades["entry_price"], errors="coerce"
+            ).fillna(last)
+            exposure = float(notionals.sum())
+
+        exposure_pct = (exposure / equity * 100.0) if equity > 0 else 0.0
+        return {
+            "total_equity": float(equity),
+            "daily_pnl": 0.0,
+            "ai_bias": str(ai.get("bias", "NEUTRAL")).upper(),
+            "confidence": float(ai.get("confidence", 0.0) or 0.0),
+            "risk_exposure": float(exposure_pct),
+        }
+
+    # Exact backend routes:
+    # - /momentum/status
+    # - /risk/status
+    m = _get_json(f"{api_url}/momentum/status")
+    r = _get_json(f"{api_url}/risk/status")
+
+    if not isinstance(m, dict) or not isinstance(r, dict):
+        raise ApiContractError("Contract mismatch: /momentum/status or /risk/status must return objects.")
+
+    # Flexible extraction for current backend shape
+    ai_payload = m.get("ai", m.get("analytics", {}))
+    ai = ai_payload if isinstance(ai_payload, dict) else {}
+    return {
+        "total_equity": float(r.get("account_balance", r.get("equity", 0.0)) or 0.0),
+        "daily_pnl": float(r.get("total_pnl", r.get("daily_pnl", 0.0)) or 0.0),
+        "ai_bias": str(ai.get("bias", m.get("bias", "NEUTRAL"))).upper(),
+        "confidence": float(ai.get("confidence", m.get("confidence", 0.0)) or 0.0),
+        "risk_exposure": float(r.get("exposure_pct", r.get("exposure", 0.0)) or 0.0),
+    }
+
+
+def get_ai_insight(api_url: str) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        symbol = _kraken_symbol()
+        exchange = _build_exchange()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=120)
+        if len(ohlcv) < 30:
+            return {
+                "bias": "NEUTRAL",
+                "confidence": 0.0,
+                "vol_forecast": None,
+                "pattern_summary": "Insufficient candles",
+                "why": "Need more market data to compute signal.",
+                "signals": [],
+            }
+
+        closes = pd.Series([float(r[4]) for r in ohlcv])
+        sma20 = float(closes.rolling(20).mean().iloc[-1])
+        sma50 = float(closes.rolling(50).mean().iloc[-1]) if len(closes) >= 50 else sma20
+        momentum = float((closes.iloc[-1] / closes.iloc[-11] - 1.0) * 100.0) if len(closes) >= 11 else 0.0
+        trend = (sma20 / sma50 - 1.0) * 100.0 if sma50 else 0.0
+        score = trend + momentum
+        bias = "BUY" if score > 0.05 else "SELL" if score < -0.05 else "NEUTRAL"
+        confidence = min(99.0, max(5.0, abs(score) * 250.0))
+        vol_forecast = float(closes.pct_change().dropna().tail(60).std() * (24 * 365) ** 0.5)
+
+        return {
+            "bias": bias,
+            "confidence": confidence,
+            "vol_forecast": vol_forecast,
+            "pattern_summary": f"trend={trend:.3f}%, momentum10={momentum:.3f}%",
+            "why": "Signal derived from SMA trend alignment and recent momentum on Kraken Futures candles.",
+            "signals": [],
+        }
+
+    data = _get_json(f"{api_url}/momentum/analytics")
+    if not isinstance(data, dict):
+        raise ApiContractError("Contract mismatch: /momentum/analytics must return an object.")
+    raw_confidence = data.get("confidence")
+    confidence = None if raw_confidence in (None, "") else float(str(raw_confidence))
+    raw_pattern_summary = data.get("pattern_summary")
+    pattern_summary = None if raw_pattern_summary in (None, "") else str(raw_pattern_summary)
+    raw_vol_forecast = data.get("volatility_forecast", data.get("vol_forecast"))
+    vol_forecast = None if raw_vol_forecast in (None, "") else float(str(raw_vol_forecast))
+    return {
+        "bias": str(data.get("bias", "NEUTRAL")),
+        "confidence": confidence,
+        "vol_forecast": vol_forecast,
+        "pattern_summary": pattern_summary,
+        "why": str(data.get("why_trade", "")),
+        "signals": data.get("signals", []),
+    }
+
+
+def get_active_trades(api_url: str) -> pd.DataFrame:
+    if _all_in_one_enabled(api_url):
+        exchange = _build_exchange()
+        try:
+            positions = exchange.fetch_positions()
+        except Exception as e:
+            raise ApiContractError(f"Failed to fetch Kraken positions: {e}") from e
+
+        rows: list[dict[str, Any]] = []
+        for p in positions or []:
+            contracts = float(p.get("contracts") or 0.0)
+            if contracts == 0:
+                continue
+            side = str(p.get("side") or "").lower() or ("buy" if contracts > 0 else "sell")
+            entry = float(p.get("entryPrice") or p.get("markPrice") or 0.0)
+            mark = float(p.get("markPrice") or entry)
+            rows.append(
+                {
+                    "symbol": str(p.get("symbol") or ""),
+                    "side": "buy" if side in {"long", "buy"} else "sell",
+                    "quantity": abs(contracts),
+                    "entry_price": entry,
+                    "current_price": mark,
+                    "unrealized_pnl": float(p.get("unrealizedPnl") or 0.0),
+                    "leverage": float(p.get("leverage") or 0.0),
+                    "source": "exchange",
+                }
+            )
+        exchange_df = pd.DataFrame(rows)
+        paper_df = _paper_positions_df()
+        if exchange_df.empty:
+            return paper_df
+        if paper_df.empty:
+            return exchange_df
+        return pd.concat([exchange_df, paper_df], ignore_index=True)
+
+    # Exact backend route replacing removed /trades/active
+    data = _get_json(f"{api_url}/risk/positions")
+    if isinstance(data, dict):
+        data = data.get("positions", [])
+    if not isinstance(data, list):
+        raise ApiContractError("Contract mismatch: /risk/positions must return list or {'positions': list}.")
+    api_df = pd.DataFrame(data)
+    paper_df = _paper_positions_df()
+    if api_df.empty:
+        return paper_df
+    if paper_df.empty:
+        return api_df
+    return pd.concat([api_df, paper_df], ignore_index=True)
+
+
+def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
+    if _all_in_one_enabled(api_url):
+        exchange = _build_exchange()
+        symbol = _kraken_symbol()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=max(50, int(limit)))
+        rows = [
+            {
+                "timestamp": pd.to_datetime(int(r[0]), unit="ms", utc=True),
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+            }
+            for r in ohlcv
+        ]
+        return pd.DataFrame(rows).tail(limit)
+
+    data = _get_json(f"{api_url}/momentum/history", params={"limit": limit})
+    candles = data.get("candles", data) if isinstance(data, dict) else data
+    if not isinstance(candles, list):
+        raise ApiContractError("Contract mismatch: /momentum/history must return list or {'candles': list}.")
+    df = pd.DataFrame(candles)
+    required = ["timestamp", "open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ApiContractError(f"Contract mismatch: /momentum/history missing columns {missing}")
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    return df.dropna(subset=required).sort_values("timestamp").tail(limit)
+
+
+def get_portfolio(api_url: str) -> pd.DataFrame:
+    if _all_in_one_enabled(api_url):
+        trades = get_active_trades(api_url)
+        if trades.empty:
+            return trades
+        trades = trades.copy()
+        trades["notional"] = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
+            trades["current_price"], errors="coerce"
+        ).fillna(0.0)
+        total = float(trades["notional"].sum())
+        trades["weight_pct"] = (trades["notional"] / total * 100.0) if total > 0 else 0.0
+        return trades
+
+    # Exact backend route replacing removed /risk/portfolio
+    data = _get_json(f"{api_url}/risk/positions")
+    if isinstance(data, dict):
+        data = data.get("positions", [])
+    if not isinstance(data, list):
+        raise ApiContractError("Contract mismatch: /risk/positions must return list or {'positions': list}.")
+    return pd.DataFrame(data)
+
+
+def get_backtest(api_url: str, lookback_days: int = 90) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        rows = _run_async(
+            _db_fetch(
+                """
+                SELECT created_at, initial_capital, final_value, total_return, sharpe_ratio, max_drawdown, total_trades, win_rate
+                FROM backtest_results
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            )
+        )
+        if not rows:
+            return {
+                "stats": {"net_pnl": 0.0, "win_rate": 0.0, "sharpe": 0.0, "max_drawdown": 0.0, "trades": 0},
+                "equity_curve": [],
+                "monthly_performance": [],
+                "analytics": {},
+            }
+        row = rows[0]
+        start_equity = float(row.get("initial_capital") or 0.0)
+        end_equity = float(row.get("final_value") or start_equity)
+        created = row.get("created_at")
+        t = pd.to_datetime(created, utc=True) if created else pd.Timestamp.utcnow()
+        return {
+            "stats": {
+                "net_pnl": end_equity - start_equity,
+                "win_rate": float(row.get("win_rate") or 0.0) * 100.0,
+                "sharpe": float(row.get("sharpe_ratio") or 0.0),
+                "max_drawdown": float(row.get("max_drawdown") or 0.0),
+                "trades": int(row.get("total_trades") or 0),
+            },
+            "equity_curve": [
+                {"t": (t - pd.Timedelta(days=int(lookback_days))).isoformat(), "equity": start_equity},
+                {"t": t.isoformat(), "equity": end_equity},
+            ],
+            "monthly_performance": [],
+            "analytics": {},
+        }
+
+    data = _get_json(
+        f"{api_url}/backtest/summary",
+        params={"days": int(lookback_days), "symbol": "PI_XBTUSD", "timeframe": "1h"},
+    )
+    if not isinstance(data, dict):
+        raise ApiContractError("Contract mismatch: /backtest/summary must return an object.")
+
+    start_equity = float(data.get("start_equity", 0.0) or 0.0)
+    end_equity = float(data.get("end_equity", start_equity) or start_equity)
+    net_pnl = end_equity - start_equity
+
+    curve_rows = []
+    for row in data.get("equity_curve", []) or []:
+        if isinstance(row, dict):
+            curve_rows.append({"t": row.get("timestamp"), "equity": float(row.get("equity", 0.0) or 0.0)})
+
+    return {
+        "stats": {
+            "net_pnl": net_pnl,
+            "win_rate": float(data.get("win_rate_pct", 0.0) or 0.0),
+            "sharpe": float(data.get("sharpe_ratio", 0.0) or 0.0),
+            "max_drawdown": float(data.get("max_drawdown_pct", 0.0) or 0.0),
+            "trades": int(data.get("trades", 0) or 0),
+        },
+        "equity_curve": curve_rows,
+        "monthly_performance": data.get("monthly_performance", []),
+        "analytics": data.get("analytics", {}),
+    }
+
+
+def emergency_close_all_positions(api_url: str) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        trading_enabled = os.getenv("KRAKEN_TRADING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if not trading_enabled:
+            return {"closed_count": 0, "detail": "Set KRAKEN_TRADING_ENABLED=true to allow live close-all in all-in-one mode."}
+
+        exchange = _build_exchange()
+        positions = exchange.fetch_positions()
+        closed = 0
+        for p in positions or []:
+            contracts = float(p.get("contracts") or 0.0)
+            if contracts == 0:
+                continue
+            symbol = str(p.get("symbol") or "")
+            side = str(p.get("side") or "").lower()
+            close_side = "sell" if side in {"long", "buy"} else "buy"
+            try:
+                exchange.create_order(symbol, "market", close_side, abs(contracts), None, {"reduceOnly": True})
+                closed += 1
+            except Exception:
+                continue
+        return {"closed_count": closed, "detail": f"Closed {closed} position(s)."}
+
+    data = _post_json(f"{api_url}/risk/close-all")
+    if not isinstance(data, dict):
+        raise ApiContractError("Contract mismatch: /risk/close-all must return an object.")
+    return data
+
+
+def get_account_balance(api_url: str) -> float:
+    if _all_in_one_enabled(api_url):
+        exchange = _build_exchange()
+        try:
+            balance = exchange.fetch_balance()
+        except Exception as e:
+            raise ApiContractError(f"Failed to fetch account balance: {e}") from e
+
+        total = balance.get("total", {}) or {}
+        equity = 0.0
+        for asset in ("USD", "USDT", "USDC", "ZUSD"):
+            equity += float(total.get(asset, 0.0) or 0.0)
+        return float(equity)
+
+    metrics = get_metrics(api_url)
+    return float(metrics.get("total_equity", 0.0) or 0.0)
+
+
+def open_trade(api_url: str, side: str, amount: float | None = None, symbol: str | None = None) -> dict[str, Any]:
+    normalized_side = str(side or "").strip().lower()
+    if normalized_side not in {"buy", "sell"}:
+        raise ApiContractError("side must be 'buy' or 'sell'.")
+
+    if _all_in_one_enabled(api_url):
+        trading_enabled = os.getenv("KRAKEN_TRADING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if not trading_enabled:
+            raise ApiContractError("Live order placement is disabled. Set KRAKEN_TRADING_ENABLED=true to enable.")
+
+        exchange = _build_exchange()
+        order_symbol = str(symbol or _kraken_symbol()).strip() or _kraken_symbol()
+        order_amount = float(amount if amount is not None else (os.getenv("KRAKEN_ORDER_SIZE", "1.0") or 1.0))
+        if order_amount <= 0:
+            raise ApiContractError("Order size must be greater than 0.")
+        try:
+            order = exchange.create_order(order_symbol, "market", normalized_side, order_amount)
+        except Exception as e:
+            raise ApiContractError(f"Failed to place Kraken order: {e}") from e
+        return {
+            "status": "submitted",
+            "symbol": order_symbol,
+            "side": normalized_side,
+            "amount": order_amount,
+            "order_id": order.get("id"),
+            "raw": order,
+        }
+
+    raise ApiContractError("open_trade is supported in All-in-One mode only.")
+
+
+def get_risk_preview(api_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        collateral_rows = payload.get("collateral_balances", []) or []
+        effective_equity = 0.0
+        for item in collateral_rows:
+            amount = float(item.get("amount", 0.0) or 0.0)
+            usd_price = float(item.get("usd_price", 0.0) or 0.0)
+            haircut = float(item.get("haircut_pct", 0.0) or 0.0)
+            effective_equity += amount * usd_price * (1.0 - haircut)
+
+        trade = payload.get("trade", {}) or {}
+        symbol = str(trade.get("symbol", "") or "")
+        entry = float(trade.get("entry_price", 0.0) or 0.0)
+        stop = float(trade.get("stop_price", entry) or entry)
+        qty = float(trade.get("quantity", 0.0) or 0.0)
+
+        open_positions = payload.get("open_positions", []) or []
+        current_risk = 0.0
+        for p in open_positions:
+            p_entry = float(p.get("entry_price", 0.0) or 0.0)
+            p_current = float(p.get("current_price", p_entry) or p_entry)
+            p_qty = float(p.get("quantity", 0.0) or 0.0)
+            current_risk += abs(p_entry - p_current) * p_qty
+
+        new_risk = abs(entry - stop) * qty
+        total_risk = current_risk + new_risk
+        risk_pct = (total_risk / effective_equity * 100.0) if effective_equity > 0 else 0.0
+
+        symbol_map = payload.get("symbol_collateral_map", {}) or {}
+        bucket_limits = payload.get("collateral_bucket_exposure_limits", {}) or {}
+        bucket_asset = str(symbol_map.get(symbol, "USDT") or "USDT")
+        bucket_limit = float(bucket_limits.get(bucket_asset, 0.60) or 0.60)
+
+        existing_bucket_exposure = 0.0
+        for p in open_positions:
+            if str(p.get("symbol", "") or "") == symbol:
+                p_qty = float(p.get("quantity", 0.0) or 0.0)
+                p_px = float(p.get("current_price", p.get("entry_price", 0.0)) or 0.0)
+                existing_bucket_exposure += p_qty * p_px
+
+        new_bucket_exposure = qty * entry
+        bucket_exposure = existing_bucket_exposure + new_bucket_exposure
+        bucket_exposure_pct = (bucket_exposure / effective_equity) if effective_equity > 0 else 0.0
+        approved = risk_pct <= 2.0 and bucket_exposure_pct <= bucket_limit
+
+        return {
+            "approved": approved,
+            "effective_equity": effective_equity,
+            "risk_pct": risk_pct,
+            "collateral_bucket_exposure_pct": bucket_exposure_pct,
+            "collateral_bucket_limit_pct": bucket_limit,
+            "trade_collateral_asset": bucket_asset,
+            "reason": "approved" if approved else "risk limit exceeded",
+        }
+
+    data = _post_json(f"{api_url}/risk/check", body=payload)
+    if not isinstance(data, dict):
+        raise ApiContractError("Contract mismatch: /risk/check must return an object.")
+    return data
