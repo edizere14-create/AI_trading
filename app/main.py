@@ -122,7 +122,7 @@ app.include_router(routes_risk.router, prefix="/risk", tags=["risk"])
 app.include_router(routes_momentum.router)
 app.include_router(routes_indicators.router, prefix="/indicators", tags=["indicators"])
 app.include_router(routes_strategy.router, prefix="/strategy", tags=["strategy"])
-app.include_router(routes_backtest.router, prefix="/backtest", tags=["backtest"])
+app.include_router(routes_backtest.router)
 app.include_router(routes_webhooks.router, prefix="/api", tags=["webhooks"])
 
 @app.get("/health")
