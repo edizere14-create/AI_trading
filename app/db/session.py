@@ -1,35 +1,63 @@
-from typing import AsyncGenerator
+"""Database session management."""
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from app.core.config import settings
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
+from configs.settings import settings
 
-# Create sync engine
+
+def _to_async_url(db_url: str) -> str:
+    value = (db_url or "").strip()
+    if value.startswith("sqlite+aiosqlite://"):
+        return value
+    if value.startswith("sqlite://"):
+        return value.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    if value.startswith("postgresql+asyncpg://"):
+        return value
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return value
+
+# Sync engine for blocking operations
 engine = create_engine(
     settings.DATABASE_URL,
+    echo=False,
     pool_pre_ping=True,
-    echo=False
 )
 
-# Create sync session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
 
-# Create async engine
+# Convert sync URL to async
+async_db_url = _to_async_url(settings.DATABASE_URL)
+
 async_engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=True,
-    future=True
+    async_db_url,
+    echo=False,
+    future=True,
 )
 
-# Create async session factory
-AsyncSessionLocal = async_sessionmaker(
+AsyncSessionLocal = sessionmaker(
     async_engine,
     class_=AsyncSession,
     expire_on_commit=False,
-    autoflush=False,
-    autocommit=False
 )
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+Base = declarative_base()
+
+
+def get_db():
+    """Sync DB dependency."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+async def get_async_db():
+    """Async DB dependency."""
     async with AsyncSessionLocal() as session:
         yield session
