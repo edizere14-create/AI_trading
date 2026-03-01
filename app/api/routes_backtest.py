@@ -14,6 +14,7 @@ from app.services.backtest_service import BacktestService
 from app.services.data_service import DataService
 
 router = APIRouter(prefix="/backtest", tags=["Backtest"])
+MAX_CURVE_POINTS = 200
 
 
 def _is_empty_summary(summary: BacktestSummaryResponse) -> bool:
@@ -22,6 +23,58 @@ def _is_empty_summary(summary: BacktestSummaryResponse) -> bool:
         and abs(float(summary.annualized_return_pct)) < 1e-12
         and abs(float(summary.max_drawdown_pct)) < 1e-12
         and int(summary.trades) == 0
+    )
+
+
+def _trim_analytics(analytics: BacktestAnalytics) -> BacktestAnalytics:
+    if len(analytics.equity_curve) <= MAX_CURVE_POINTS and len(analytics.drawdown_curve) <= MAX_CURVE_POINTS:
+        return analytics
+    return BacktestAnalytics(
+        symbol=analytics.symbol,
+        timeframe=analytics.timeframe,
+        days=analytics.days,
+        total_return_pct=analytics.total_return_pct,
+        annualized_return_pct=analytics.annualized_return_pct,
+        max_drawdown_pct=analytics.max_drawdown_pct,
+        sharpe_ratio=analytics.sharpe_ratio,
+        win_rate_pct=analytics.win_rate_pct,
+        profit_factor=analytics.profit_factor,
+        trades=analytics.trades,
+        slippage_bps=analytics.slippage_bps,
+        start_equity=analytics.start_equity,
+        end_equity=analytics.end_equity,
+        equity_curve=analytics.equity_curve[-MAX_CURVE_POINTS:],
+        drawdown_curve=analytics.drawdown_curve[-MAX_CURVE_POINTS:],
+        monthly_performance=analytics.monthly_performance,
+    )
+
+
+def _trim_summary(summary: BacktestSummaryResponse) -> BacktestSummaryResponse:
+    trimmed_analytics = _trim_analytics(summary.analytics) if summary.analytics is not None else None
+    if (
+        len(summary.equity_curve) <= MAX_CURVE_POINTS
+        and len(summary.drawdown_curve) <= MAX_CURVE_POINTS
+        and trimmed_analytics is summary.analytics
+    ):
+        return summary
+    return BacktestSummaryResponse(
+        symbol=summary.symbol,
+        timeframe=summary.timeframe,
+        days=summary.days,
+        total_return_pct=summary.total_return_pct,
+        annualized_return_pct=summary.annualized_return_pct,
+        max_drawdown_pct=summary.max_drawdown_pct,
+        sharpe_ratio=summary.sharpe_ratio,
+        win_rate_pct=summary.win_rate_pct,
+        trades=summary.trades,
+        start_equity=summary.start_equity,
+        end_equity=summary.end_equity,
+        equity_curve=summary.equity_curve[-MAX_CURVE_POINTS:],
+        drawdown_curve=summary.drawdown_curve[-MAX_CURVE_POINTS:],
+        monthly_performance=summary.monthly_performance,
+        slippage_bps=summary.slippage_bps,
+        profit_factor=summary.profit_factor,
+        analytics=trimmed_analytics,
     )
 
 
@@ -497,19 +550,19 @@ async def backtest_summary(
         service = BacktestService(DataService())
         summary = await _summary_compat(service, days=days, symbol=symbol, timeframe=timeframe)
         if not _is_empty_summary(summary):
-            return summary
+            return _trim_summary(summary)
     except Exception:
         summary = None
 
     try:
-        return await _direct_summary(symbol=symbol, timeframe=timeframe, days=days)
+        return _trim_summary(await _direct_summary(symbol=symbol, timeframe=timeframe, days=days))
     except Exception:
-        return BacktestSummaryResponse(
+        return _trim_summary(BacktestSummaryResponse(
             symbol=symbol,
             timeframe=timeframe,
             days=days,
             analytics=BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days),
-        )
+        ))
 
 
 @router.get(
@@ -561,8 +614,9 @@ async def backtest_analytics(
         summary = await _summary_compat(service, days=days, symbol=symbol, timeframe=timeframe)
         if _is_empty_summary(summary):
             summary = await _direct_summary(symbol=symbol, timeframe=timeframe, days=days)
+        summary = _trim_summary(summary)
         if summary.analytics is not None:
-            return summary.analytics
+            return _trim_analytics(summary.analytics)
 
         return BacktestAnalytics(
             symbol=summary.symbol,
@@ -584,6 +638,7 @@ async def backtest_analytics(
         )
     except Exception:
         try:
-            return (await _direct_summary(symbol=symbol, timeframe=timeframe, days=days)).analytics or BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days)
+            analytics = (await _direct_summary(symbol=symbol, timeframe=timeframe, days=days)).analytics or BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days)
+            return _trim_analytics(analytics)
         except Exception:
             return BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days)
