@@ -1,4 +1,7 @@
 """Backtest endpoints."""
+from datetime import datetime, timedelta, timezone
+import inspect
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.backtest import BacktestSummaryResponse, BacktestAnalytics
@@ -16,7 +19,49 @@ async def _summary_compat(service: BacktestService, *, days: int, symbol: str, t
         return BacktestSummaryResponse.model_validate(result)
 
     if hasattr(service, "run_backtest"):
-        result = await service.run_backtest(days=days, symbol=symbol, timeframe=timeframe)
+        run_backtest = getattr(service, "run_backtest")
+        signature = inspect.signature(run_backtest)
+        names = set(signature.parameters.keys())
+        now = datetime.now(timezone.utc)
+        start_at = now - timedelta(days=max(1, int(days)))
+
+        kwargs: dict[str, object] = {}
+
+        if "days" in names:
+            kwargs["days"] = days
+        elif "lookback_days" in names:
+            kwargs["lookback_days"] = days
+        elif "lookback" in names:
+            kwargs["lookback"] = days
+
+        if "symbol" in names:
+            kwargs["symbol"] = symbol
+        elif "pair" in names:
+            kwargs["pair"] = symbol
+        elif "market" in names:
+            kwargs["market"] = symbol
+
+        if "timeframe" in names:
+            kwargs["timeframe"] = timeframe
+        elif "interval" in names:
+            kwargs["interval"] = timeframe
+
+        if "start_date" in names:
+            kwargs["start_date"] = start_at
+        elif "start" in names:
+            kwargs["start"] = start_at
+
+        if "end_date" in names:
+            kwargs["end_date"] = now
+        elif "end" in names:
+            kwargs["end"] = now
+
+        if "strategy" in names and "strategy" not in kwargs:
+            kwargs["strategy"] = "momentum"
+        elif "strategy_name" in names and "strategy_name" not in kwargs:
+            kwargs["strategy_name"] = "momentum"
+
+        result = await run_backtest(**kwargs)
         if isinstance(result, BacktestSummaryResponse):
             return result
         return BacktestSummaryResponse.model_validate(result)
