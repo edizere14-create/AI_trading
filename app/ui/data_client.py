@@ -130,6 +130,26 @@ def _post_json(url: str, body: dict[str, Any] | None = None, params: dict[str, A
         raise ApiContractError(f"API request failed: {url} -> {e}") from e
 
 
+def _analytics_fallback(reason: str = "Backend data layer issue") -> dict[str, Any]:
+    return {
+        "bias": "NEUTRAL",
+        "confidence": None,
+        "vol_forecast": None,
+        "pattern_summary": "Demo mode",
+        "why": reason,
+        "signals": [],
+    }
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def get_metrics(api_url: str) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
@@ -224,22 +244,30 @@ def get_ai_insight(api_url: str) -> dict[str, Any]:
             "signals": [],
         }
 
-    data = _get_json(f"{api_url}/momentum/analytics")
+    try:
+        data = _get_json(f"{api_url}/momentum/analytics")
+    except ApiContractError:
+        return _analytics_fallback()
+
     if not isinstance(data, dict):
-        raise ApiContractError("Contract mismatch: /momentum/analytics must return an object.")
-    raw_confidence = data.get("confidence")
-    confidence = None if raw_confidence in (None, "") else float(str(raw_confidence))
+        return _analytics_fallback("Contract mismatch on /momentum/analytics")
+
+    confidence_value = _safe_float(data.get("confidence"))
+    vol_forecast_value = _safe_float(data.get("volatility_forecast", data.get("vol_forecast")))
     raw_pattern_summary = data.get("pattern_summary")
-    pattern_summary = None if raw_pattern_summary in (None, "") else str(raw_pattern_summary)
-    raw_vol_forecast = data.get("volatility_forecast", data.get("vol_forecast"))
-    vol_forecast = None if raw_vol_forecast in (None, "") else float(str(raw_vol_forecast))
+    pattern_summary = "Demo mode" if raw_pattern_summary in (None, "") else str(raw_pattern_summary)
+    raw_why = data.get("why_trade", data.get("why", ""))
+    why = "Backend data layer issue" if raw_why in (None, "") else str(raw_why)
+    raw_signals = data.get("signals", [])
+    signals = raw_signals if isinstance(raw_signals, list) else []
+
     return {
         "bias": str(data.get("bias", "NEUTRAL")),
-        "confidence": confidence,
-        "vol_forecast": vol_forecast,
+        "confidence": confidence_value,
+        "vol_forecast": vol_forecast_value,
         "pattern_summary": pattern_summary,
-        "why": str(data.get("why_trade", "")),
-        "signals": data.get("signals", []),
+        "why": why,
+        "signals": signals,
     }
 
 

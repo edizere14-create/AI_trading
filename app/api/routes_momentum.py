@@ -2,18 +2,33 @@ from __future__ import annotations
 
 import asyncio
 import os
+import logging
+import traceback
 from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Query
+import pandas as pd
 
 router = APIRouter(prefix="/momentum", tags=["momentum"])
+logger = logging.getLogger(__name__)
 
 momentum_worker = None
 momentum_task = None
 startup_error = None
 fallback_is_running = False
 fallback_symbol = "PI_XBTUSD"
+
+
+def _fallback_analytics(reason: str = "Waiting for market data...") -> dict[str, Any]:
+    return {
+        "bias": "NEUTRAL",
+        "confidence": None,
+        "vol_forecast": None,
+        "pattern_summary": None,
+        "why_trade": reason,
+        "signals": [],
+    }
 
 
 def _build_momentum_worker(symbol: str):
@@ -137,3 +152,80 @@ async def get_momentum_history(limit: int = Query(50, ge=1, le=500)) -> dict[str
     signals = list(getattr(momentum_worker, "signal_history", []))[-limit:]
     candles = list(getattr(momentum_worker, "candle_history", []))[-limit:]
     return {"signals": signals, "candles": candles}
+
+
+@router.get("/analytics")
+async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
+    from app.services.data_service import DataService
+
+    exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
+    data_service = DataService(exchange_id=exchange_id)
+
+    try:
+        candles = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=120, exchange_id=exchange_id)
+        if candles is None or candles.empty:
+            return _fallback_analytics("No market data returned.")
+
+        close = pd.to_numeric(candles.get("close"), errors="coerce").dropna()
+        if len(close) < 30:
+            return _fallback_analytics("Insufficient candles for analytics.")
+
+        sma20 = float(close.rolling(20).mean().iloc[-1])
+        sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else sma20
+        momentum10 = float((close.iloc[-1] / close.iloc[-11] - 1.0) * 100.0) if len(close) >= 11 else 0.0
+        trend = (sma20 / sma50 - 1.0) * 100.0 if sma50 else 0.0
+        score = trend + momentum10
+
+        if score > 0.05:
+            bias = "BUY"
+            pattern_summary = "Bullish momentum with price above trend mean"
+            signals = ["momentum_bull", "trend_confirmed"]
+        elif score < -0.05:
+            bias = "SELL"
+            pattern_summary = "Bearish momentum with price below trend mean"
+            signals = ["momentum_bear", "trend_confirmed"]
+        else:
+            bias = "NEUTRAL"
+            pattern_summary = "Mixed momentum and trend"
+            signals = []
+
+        confidence = min(99.0, max(5.0, abs(score) * 250.0))
+        vol_forecast = float(close.pct_change().dropna().tail(60).std() * (24 * 365) ** 0.5)
+
+        return {
+            "bias": bias,
+            "confidence": confidence,
+            "vol_forecast": vol_forecast,
+            "pattern_summary": pattern_summary,
+            "why_trade": f"trend={trend:.3f}% and momentum10={momentum10:.3f}%",
+            "signals": signals,
+        }
+    except Exception as exc:
+        logger.warning("Momentum analytics fetch failed; using fallback: %s", exc)
+        return _fallback_analytics("Waiting for market data...")
+
+
+@router.get("/debug-data")
+async def debug_data(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
+    from app.services.data_service import DataService
+
+    exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
+    data_service = DataService(exchange_id=exchange_id)
+
+    try:
+        ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
+        latest_close = None
+        if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+            latest_close = float(pd.to_numeric(ohlcv["close"], errors="coerce").dropna().iloc[-1])
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "rows": int(len(ohlcv) if ohlcv is not None else 0),
+            "latest_close": latest_close,
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "symbol": symbol,
+        }
