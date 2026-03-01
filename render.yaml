@@ -31,15 +31,15 @@ services:
 
   - type: web
     name: ai-trading-dashboard
-    env: node
+    env: python
     plan: free
     branch: streamlit-deploy
     autoDeploy: true
-    buildCommand: cd frontend && npm install && npm run build
-    startCommand: cd frontend && npm run preview -- --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r cloud_streamlit/requirements.txt
+    startCommand: streamlit run cloud_streamlit/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     healthCheckPath: /
     envVars:
-      - key: VITE_API_BASE_URL
+      - key: API_BASE_URL
         value: https://ai-trading-1-dwvg.onrender.com
-      - key: VITE_POLL_MS
-        value: 8000
+      - key: PYTHON_VERSION
+        value: 3.13.11
