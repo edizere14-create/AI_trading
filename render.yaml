@@ -34,9 +34,10 @@ services:
     env: python
     plan: free
     branch: streamlit-deploy
+    rootDir: cloud_streamlit
     autoDeploy: true
-    buildCommand: pip install -r cloud_streamlit/requirements.txt
-    startCommand: streamlit run cloud_streamlit/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     healthCheckPath: /
     envVars:
       - key: API_BASE_URL
