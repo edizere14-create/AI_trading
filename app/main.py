@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -275,6 +275,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 @app.get("/")
 async def root() -> dict[str, str]:
     return {"message": "AI Trading API", "status": "running", "docs": "/docs"}
+
+
+@app.head("/")
+async def root_head() -> Response:
+    return Response(status_code=200)
 
 if __name__ == "__main__":
     import uvicorn
