@@ -36,7 +36,7 @@ services:
     branch: streamlit-deploy
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    startCommand: streamlit run dashboard/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     healthCheckPath: /
     envVars:
       - key: API_BASE_URL
