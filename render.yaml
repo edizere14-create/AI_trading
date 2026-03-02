@@ -28,6 +28,10 @@ services:
         sync: false
       - key: KRAKEN_API_SECRET
         sync: false
+      - key: RATE_LIMIT_WINDOW_SEC
+        value: 60
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: 120
 
   - type: web
     name: ai-trading-dashboard
@@ -47,5 +51,11 @@ services:
         value: wss://ai-trading-engd.onrender.com/ws/price
       - key: STREAMLIT_APP_MODE
         value: backend-api
+      - key: DASHBOARD_AUTH_ENABLED
+        value: true
+      - key: DASHBOARD_AUTH_USERNAME
+        value: admin
+      - key: DASHBOARD_AUTH_PASSWORD
+        sync: false
       - key: PYTHON_VERSION
         value: 3.12.9

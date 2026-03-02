@@ -7,7 +7,9 @@ from __future__ import annotations
 from typing import Any, cast
 import base64
 import binascii
+import hmac
 import os
+import time
 import requests
 
 import streamlit as st
@@ -51,6 +53,52 @@ def _api_is_healthy(api_url: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _health_probe(api_url: str, interval_sec: int = 30) -> bool:
+    now = time.time()
+    cache_key = f"health_cache::{api_url}"
+    cache = st.session_state.get(cache_key)
+    if isinstance(cache, dict) and now - float(cache.get("ts", 0.0)) < float(interval_sec):
+        return bool(cache.get("healthy", False))
+
+    healthy = _api_is_healthy(api_url)
+    st.session_state[cache_key] = {"healthy": healthy, "ts": now}
+    return healthy
+
+
+def _require_dashboard_login() -> None:
+    auth_enabled = os.getenv("DASHBOARD_AUTH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not auth_enabled:
+        return
+
+    expected_user = os.getenv("DASHBOARD_AUTH_USERNAME", "admin").strip() or "admin"
+    expected_password = os.getenv("DASHBOARD_AUTH_PASSWORD", "").strip()
+    if not expected_password:
+        st.error("Dashboard auth is enabled but not configured. Set DASHBOARD_AUTH_PASSWORD.")
+        st.stop()
+
+    if st.session_state.get("dashboard_authenticated"):
+        if st.sidebar.button("Log out", use_container_width=True):
+            st.session_state.dashboard_authenticated = False
+            st.rerun()
+        return
+
+    st.title("Dashboard Login")
+    with st.form("dashboard_login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+
+    if submitted:
+        user_ok = hmac.compare_digest(username.strip(), expected_user)
+        pass_ok = hmac.compare_digest(password, expected_password)
+        if user_ok and pass_ok:
+            st.session_state.dashboard_authenticated = True
+            st.rerun()
+        st.error("Invalid credentials")
+
+    st.stop()
 
 
 def _load_futures_symbols(api_url: str, default_symbol: str) -> list[str]:
@@ -133,6 +181,7 @@ def _derive_ws_url_from_api(api_url: str) -> str:
 
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
+_require_dashboard_login()
 
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
@@ -232,7 +281,7 @@ preview_collateral_total_usd = st.sidebar.number_input("Collateral Total (USD)",
 st.sidebar.markdown("---")
 st.sidebar.subheader("Emergency Controls")
 
-api_healthy = _api_is_healthy(api_url)
+api_healthy = _health_probe(api_url, interval_sec=30)
 st.sidebar.caption("API Health: ✅ Healthy" if api_healthy else "API Health: ❌ Unreachable")
 
 try:

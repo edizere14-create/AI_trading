@@ -1,6 +1,7 @@
 # FastAPI endpoint for placing live orders
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from typing import Dict, List
 
 from app.schemas.trade import PlaceOrderRequest, OrderResponse, OrderHistory
@@ -57,6 +58,40 @@ async def get_orders(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch order history",
+        )
+
+
+@router.get("/execution-logs")
+async def get_execution_logs(
+    limit: int = 50,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_dep),
+) -> Dict[str, List[Dict[str, object]]]:
+    """Get recent execution logs for the authenticated user."""
+    if user is None or user.id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+    safe_limit = max(1, min(int(limit), 200))
+    try:
+        result = await db.execute(
+            text(
+                """
+                SELECT created_at, event_type, symbol, side, quantity, price, status, details
+                FROM execution_logs
+                WHERE user_id = :user_id
+                ORDER BY id DESC
+                LIMIT :limit
+                """
+            ),
+            {"user_id": int(user.id), "limit": safe_limit},
+        )
+        rows = result.mappings().all()
+        return {"logs": [dict(row) for row in rows]}
+    except Exception as exc:
+        logger.exception("Failed to fetch execution logs")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch execution logs: {exc}",
         )
 
 @router.get("/health")

@@ -4,8 +4,10 @@ import asyncio
 import logging
 import os
 import requests
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager, suppress
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response, status
@@ -166,6 +168,42 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "60") or "60")
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "120") or "120")
+_rate_limiter: dict[str, deque[float]] = defaultdict(deque)
+_rate_limit_exempt = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+
+@app.middleware("http")
+async def rate_limit_middleware(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    path = request.url.path
+    if path in _rate_limit_exempt:
+        return await call_next(request)
+
+    client_ip = (request.client.host if request.client else "unknown")
+    key = f"{client_ip}:{path}"
+    now = time.monotonic()
+    bucket = _rate_limiter[key]
+
+    while bucket and now - bucket[0] > RATE_LIMIT_WINDOW_SEC:
+        bucket.popleft()
+
+    if len(bucket) >= RATE_LIMIT_MAX_REQUESTS:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded",
+                "window_sec": RATE_LIMIT_WINDOW_SEC,
+                "max_requests": RATE_LIMIT_MAX_REQUESTS,
+            },
+        )
+
+    bucket.append(now)
+    return await call_next(request)
 
 # Include routers
 app.include_router(routes_auth.router, prefix="/auth", tags=["auth"])
