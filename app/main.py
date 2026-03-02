@@ -183,7 +183,10 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
     try:
         while True:
             # Fetch current price
-            price = await kraken_broker.get_ticker(symbol)
+            try:
+                price = await asyncio.wait_for(kraken_broker.get_ticker(symbol), timeout=2.5)
+            except Exception:
+                price = 0.0
 
             if price <= 0:
                 try:
@@ -196,7 +199,10 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
                     elif "SOL" in symbol_upper:
                         fallback_symbol = "SOL"
 
-                    fallback_price = await DataService().get_live_price(fallback_symbol)
+                    fallback_price = await asyncio.wait_for(
+                        DataService().get_live_price(fallback_symbol),
+                        timeout=3.0,
+                    )
                     price = float(getattr(fallback_price, "price", 0.0) or 0.0)
                 except Exception:
                     price = 0.0
@@ -235,7 +241,7 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
             else:
                 logger.warning("Invalid price received for %s: %s", symbol, price)
             
-            await asyncio.sleep(5)  # Update every 5 seconds
+            await asyncio.sleep(2)  # Update every 2 seconds
             
     except WebSocketDisconnect:
         logger.info("Client disconnected from price feed: %s", symbol)
