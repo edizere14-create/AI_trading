@@ -14,6 +14,7 @@ Required `.env` keys:
 - `DATABASE_URL`
 - `KRAKEN_API_KEY`
 - `KRAKEN_API_SECRET`
+- `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
 - `KRAKEN_FUTURES_DEMO=true` (recommended)
 
 Optional:
@@ -48,6 +49,7 @@ Set in `.env`:
 
 - `KRAKEN_API_KEY=...`
 - `KRAKEN_API_SECRET=...`
+- `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
 
 Run:
 
@@ -140,6 +142,7 @@ Use these backend environment values:
 - `EXECUTION_EXCHANGE_ID=krakenfutures`
 - `MARKET_DATA_EXCHANGE_ID=krakenfutures`
 - `KRAKEN_FUTURES_DEMO=true`
+- `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
 - `MOMENTUM_DEFAULT_SYMBOL=PI_XBTUSD`
 - `MOMENTUM_AUTO_START=true`
 

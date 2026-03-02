@@ -25,6 +25,7 @@ Set in `.env`:
 
 - `KRAKEN_API_KEY=...`
 - `KRAKEN_API_SECRET=...`
+- `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
 
 ```powershell
 npm run kraken:demo:smoke
@@ -203,6 +204,7 @@ kubectl apply -f k8s/ingress.yaml
 DATABASE_URL=postgresql://user:password@host:5432/ai_trading
 KRAKEN_API_KEY=your_key
 KRAKEN_API_SECRET=your_secret
+KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/
 ENVIRONMENT=production
 LOG_LEVEL=INFO
 ```
