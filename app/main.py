@@ -12,11 +12,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.config import settings
+from app.core.logging_config import setup_logging
 from app.services.websocket_service import ConnectionManager
 from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
 from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest, routes_webhooks, routes_momentum
+
+setup_logging(settings.LOG_LEVEL)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +128,22 @@ app.include_router(routes_indicators.router, prefix="/indicators", tags=["indica
 app.include_router(routes_strategy.router, prefix="/strategy", tags=["strategy"])
 app.include_router(routes_backtest.router)
 app.include_router(routes_webhooks.router, prefix="/api", tags=["webhooks"])
+
+
+@app.post("/webhook/tradingview")
+async def receive_tradingview_signal_alias(request: Request) -> dict[str, Any]:
+    payload = await routes_webhooks.receive_tradingview_signal(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid webhook response payload")
+    return payload
+
+
+@app.post("/api/webhook/tradingview")
+async def receive_tradingview_signal_api_alias(request: Request) -> dict[str, Any]:
+    payload = await routes_webhooks.receive_tradingview_signal(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid webhook response payload")
+    return payload
 
 @app.get("/health")
 async def health_check() -> dict[str, str | int | bool]:
