@@ -41,6 +41,8 @@ services:
     envVars:
       - key: API_BASE_URL
         value: https://ai-trading-engd.onrender.com
+      - key: WS_URL
+        value: wss://ai-trading-engd.onrender.com/ws/price
       - key: STREAMLIT_APP_MODE
         value: backend-api
       - key: PYTHON_VERSION
