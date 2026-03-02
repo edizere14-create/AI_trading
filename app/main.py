@@ -184,6 +184,22 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
         while True:
             # Fetch current price
             price = await kraken_broker.get_ticker(symbol)
+
+            if price <= 0:
+                try:
+                    from app.services.data_service import DataService
+
+                    fallback_symbol = "BTC"
+                    symbol_upper = str(symbol or "").upper()
+                    if "ETH" in symbol_upper:
+                        fallback_symbol = "ETH"
+                    elif "SOL" in symbol_upper:
+                        fallback_symbol = "SOL"
+
+                    fallback_price = await DataService().get_live_price(fallback_symbol)
+                    price = float(getattr(fallback_price, "price", 0.0) or 0.0)
+                except Exception:
+                    price = 0.0
             
             if price > 0:
                 # TODO: Calculate RSI from historical data
