@@ -8,7 +8,7 @@ from app.schemas.trade import PlaceOrderRequest, OrderResponse, OrderHistory
 from app.services.broker_service import get_broker_for_user
 from app.services.execution_log_service import log_execution_event
 from app.db.models.trade import Order, OrderStatus
-from app.db.async_database import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
