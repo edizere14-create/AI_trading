@@ -230,6 +230,13 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
         except Exception:
             pass
 
+
+@app.websocket("/ws/price")
+async def websocket_price_alias(websocket: WebSocket) -> None:
+    """Compatibility alias for dashboard default WebSocket URL."""
+    default_symbol = os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PI_XBTUSD").strip() or "PI_XBTUSD"
+    await websocket_prices(websocket, default_symbol)
+
 @app.get("/test/400")
 async def test_400() -> None:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Test 400 error")
