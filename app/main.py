@@ -13,14 +13,18 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from app.core.logging_config import setup_logging
+from app.core import logging_config
 from app.services.websocket_service import ConnectionManager
 from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
 from app.api import routes_auth, routes_users, routes_portfolio, routes_trade, routes_data, routes_risk, routes_indicators, routes_strategy, routes_backtest, routes_webhooks, routes_momentum
 
-setup_logging(settings.LOG_LEVEL)
+_setup_logging = getattr(logging_config, "setup_logging", None) or getattr(logging_config, "configure_logging", None)
+if callable(_setup_logging):
+    _setup_logging(settings.LOG_LEVEL)
+else:
+    logging.basicConfig(level=getattr(logging, str(settings.LOG_LEVEL).upper(), logging.INFO))
 
 logger = logging.getLogger(__name__)
 
