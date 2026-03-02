@@ -36,9 +36,11 @@ services:
     branch: streamlit-deploy
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run dashboard/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    startCommand: streamlit run dashboard/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
     healthCheckPath: /
     envVars:
+      - key: ENVIRONMENT
+        value: production
       - key: API_BASE_URL
         value: https://ai-trading-engd.onrender.com
       - key: WS_URL

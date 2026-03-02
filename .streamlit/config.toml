@@ -1,0 +1,18 @@
+[theme]
+base = "dark"
+primaryColor = "#00D4FF"              # neon blue
+backgroundColor = "#06090F"           # near black
+secondaryBackgroundColor = "#0D131C"  # deep charcoal
+textColor = "#E8EEF7"
+font = "sans serif"
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true

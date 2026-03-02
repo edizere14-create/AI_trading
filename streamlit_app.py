@@ -149,7 +149,8 @@ if configured_ws_url and "127.0.0.1" not in configured_ws_url and "localhost" no
 else:
     default_ws_url = _derive_ws_url_from_api(default_api_url)
 
-default_mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
+default_mode = os.getenv("STREAMLIT_APP_MODE", "backend-api").strip().lower()
+is_production = os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
 all_in_one_modes = {"all-in-one", "all_in_one", "direct", "standalone"}
 backend_api_modes = {"backend-api", "backend_api", "api", "backend"}
 if default_mode in all_in_one_modes:
@@ -159,6 +160,10 @@ elif default_mode in backend_api_modes:
 else:
     mode_index = 0
 mode = st.sidebar.radio("App Mode", ["All-in-One", "Backend API"], index=mode_index)
+
+if is_production and mode == "All-in-One":
+    st.sidebar.warning("All-in-One is disabled in production for safety. Using Backend API mode.")
+    mode = "Backend API"
 
 
 def _all_in_one_ready() -> bool:
