@@ -84,6 +84,51 @@ Notes:
 - Open the deployed Streamlit URL
 - Confirm health/status/history return without 4xx/5xx errors
 
+## Render Deployment Requirements (Dashboard)
+
+Set this env var in the Streamlit service:
+
+- `STREAMLIT_APP_MODE=all-in-one` for standalone mode
+- `STREAMLIT_APP_MODE=backend-api` when the dashboard talks to FastAPI
+
+For `all-in-one`, also set:
+
+- `DATABASE_URL`
+- `KRAKEN_API_KEY`
+- `KRAKEN_API_SECRET`
+
+Repository structure expected by `streamlit_app.py`:
+
+```text
+.
+├── streamlit_app.py
+├── requirements.txt
+├── .gitignore
+└── app/
+  ├── core/
+  ├── services/
+  └── ui/
+```
+
+`requirements.txt` should include at least:
+
+- `streamlit`
+- `streamlit-autorefresh`
+- `requests`
+- `httpx`
+
+`.gitignore` should exclude deployment-unsafe local files:
+
+- `.env`
+- `.venv/`
+- `*.db`
+- `logs/`
+
+### Render free-tier spin-down note
+
+This dashboard uses `st_autorefresh` (default every 2 seconds), but browser-side refresh does not prevent Render free-tier sleep.
+Use an external monitor (for example UptimeRobot) to ping a backend health endpoint like `/health` if you need to reduce cold starts.
+
 ## Docker Deployment
 
 ### 1. Build & Run Locally
