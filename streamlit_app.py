@@ -122,6 +122,15 @@ def _all_in_one_credential_preflight() -> tuple[bool, str]:
 
     return True, ""
 
+
+def _derive_ws_url_from_api(api_url: str) -> str:
+    base = str(api_url or "").strip().rstrip("/")
+    if base.startswith("https://"):
+        return f"wss://{base[len('https://'): ]}/ws/price"
+    if base.startswith("http://"):
+        return f"ws://{base[len('http://'): ]}/ws/price"
+    return "ws://127.0.0.1:8000/ws/price"
+
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
 
@@ -134,7 +143,11 @@ page = st.sidebar.radio(
 
 settings_obj = cast(Any, settings)
 default_api_url = str(getattr(settings_obj, "api_base_url", "http://127.0.0.1:8000"))
-default_ws_url = str(getattr(settings_obj, "ws_url", "ws://127.0.0.1:8000/ws/price"))
+configured_ws_url = str(getattr(settings_obj, "ws_url", "")).strip()
+if configured_ws_url and "127.0.0.1" not in configured_ws_url and "localhost" not in configured_ws_url:
+    default_ws_url = configured_ws_url
+else:
+    default_ws_url = _derive_ws_url_from_api(default_api_url)
 
 default_mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
 all_in_one_modes = {"all-in-one", "all_in_one", "direct", "standalone"}
