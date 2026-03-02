@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     KRAKEN_API_KEY: str = ""
     KRAKEN_API_SECRET: str = ""
     KRAKEN_BASE_URL: str = "https://demo-futures.kraken.com/derivatives/api/v3/"
+    KRAKEN_WS_URL: str = "wss://demo-futures.kraken.com/ws/v1"
     
     # Optional fields with defaults
     PROJECT_NAME: str = "AI Trading API"

@@ -98,7 +98,9 @@ class PriceStream:
         symbol = self.ws_url.replace("kraken://", "", 1).strip() or os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD")
         product_id = self._kraken_product_id(symbol)
         demo = os.getenv("KRAKEN_FUTURES_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
-        ws_endpoint = "wss://demo-futures.kraken.com/ws/v1" if demo else "wss://futures.kraken.com/ws/v1"
+        ws_endpoint = os.getenv("KRAKEN_WS_URL", "").strip()
+        if not ws_endpoint:
+            ws_endpoint = "wss://demo-futures.kraken.com/ws/v1" if demo else "wss://futures.kraken.com/ws/v1"
 
         def on_open(ws_app) -> None:
             msg = {

@@ -15,6 +15,7 @@ Required `.env` keys:
 - `KRAKEN_API_KEY`
 - `KRAKEN_API_SECRET`
 - `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
+- `KRAKEN_WS_URL=wss://demo-futures.kraken.com/ws/v1`
 - `KRAKEN_FUTURES_DEMO=true` (recommended)
 
 Optional:
@@ -50,6 +51,7 @@ Set in `.env`:
 - `KRAKEN_API_KEY=...`
 - `KRAKEN_API_SECRET=...`
 - `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
+- `KRAKEN_WS_URL=wss://demo-futures.kraken.com/ws/v1`
 
 Run:
 

@@ -26,6 +26,7 @@ Set in `.env`:
 - `KRAKEN_API_KEY=...`
 - `KRAKEN_API_SECRET=...`
 - `KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/`
+- `KRAKEN_WS_URL=wss://demo-futures.kraken.com/ws/v1`
 
 ```powershell
 npm run kraken:demo:smoke
@@ -205,6 +206,7 @@ DATABASE_URL=postgresql://user:password@host:5432/ai_trading
 KRAKEN_API_KEY=your_key
 KRAKEN_API_SECRET=your_secret
 KRAKEN_BASE_URL=https://demo-futures.kraken.com/derivatives/api/v3/
+KRAKEN_WS_URL=wss://demo-futures.kraken.com/ws/v1
 ENVIRONMENT=production
 LOG_LEVEL=INFO
 ```
