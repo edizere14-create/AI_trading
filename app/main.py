@@ -91,6 +91,42 @@ async def _fetch_kraken_public_price(symbol: str) -> float:
 
     return await asyncio.to_thread(_request)
 
+
+async def _fetch_kraken_spot_price(symbol: str) -> float:
+    symbol_upper = str(symbol or "").upper()
+    if "ETH" in symbol_upper:
+        pair = "ETHUSD"
+    elif "SOL" in symbol_upper:
+        pair = "SOLUSD"
+    else:
+        pair = "XBTUSD"
+
+    endpoint = "https://api.kraken.com/0/public/Ticker"
+
+    def _request() -> float:
+        response = requests.get(endpoint, params={"pair": pair}, timeout=4)
+        response.raise_for_status()
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict) or payload.get("error"):
+            return 0.0
+        result = payload.get("result")
+        if not isinstance(result, dict) or not result:
+            return 0.0
+        ticker = next(iter(result.values()))
+        if not isinstance(ticker, dict):
+            return 0.0
+        last = ticker.get("c")
+        if isinstance(last, list) and last:
+            try:
+                px = float(last[0])
+            except (TypeError, ValueError):
+                px = 0.0
+            if px > 0:
+                return px
+        return 0.0
+
+    return await asyncio.to_thread(_request)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for startup/shutdown."""
@@ -282,6 +318,12 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
             if price <= 0:
                 try:
                     price = await asyncio.wait_for(_fetch_kraken_public_price(symbol), timeout=3.0)
+                except Exception:
+                    price = 0.0
+
+            if price <= 0:
+                try:
+                    price = await asyncio.wait_for(_fetch_kraken_spot_price(symbol), timeout=3.0)
                 except Exception:
                     price = 0.0
 
