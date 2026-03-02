@@ -204,7 +204,8 @@ else:
     default_ws_url = _derive_ws_url_from_api(default_api_url)
 
 default_mode = os.getenv("STREAMLIT_APP_MODE", "backend-api").strip().lower()
-is_production = os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
+env_is_production = os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
+is_production = env_is_production or ("onrender.com" in default_api_url.lower())
 all_in_one_modes = {"all-in-one", "all_in_one", "direct", "standalone"}
 backend_api_modes = {"backend-api", "backend_api", "api", "backend"}
 if default_mode in all_in_one_modes:
@@ -255,9 +256,10 @@ else:
     api_url = st.sidebar.text_input("Backend URL", default_api_url)
     ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 
-if is_production and _is_local_ws_url(ws_url):
-    ws_url = default_ws_url
-    st.sidebar.warning("Local WebSocket URL detected in production. Using Render WebSocket URL.")
+is_remote_backend = str(api_url).strip().lower().startswith("https://") or ("onrender.com" in str(api_url).strip().lower())
+if _is_local_ws_url(ws_url) and (is_production or is_remote_backend):
+    ws_url = _derive_ws_url_from_api(api_url)
+    st.sidebar.warning("Local WebSocket URL detected with remote backend. Using remote WebSocket URL.")
 
 refresh_sec = st.sidebar.slider("Refresh (sec)", 1, 30, 2)
 
