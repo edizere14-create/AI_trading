@@ -5,6 +5,8 @@ Combines Real-time Monitoring, Portfolio Analytics, and Signal Execution.
 from __future__ import annotations
 
 from typing import Any, cast
+import base64
+import binascii
 import os
 import requests
 
@@ -14,7 +16,14 @@ from streamlit_autorefresh import st_autorefresh
 from app.core.config import settings
 from app.services.ws_client import get_price_stream
 from app.ui.pages import render_dashboard, render_portfolio, render_backtesting
-from app.ui.data_client import ApiContractError, emergency_close_all_positions, get_account_balance, open_trade, add_paper_trade
+from app.ui.data_client import (
+    ApiContractError,
+    add_paper_trade,
+    emergency_close_all_positions,
+    get_account_balance,
+    get_ai_insight,
+    open_trade,
+)
 from app.ui.theme import apply_theme
 
 HTTP_TIMEOUT_SEC = 3
@@ -95,6 +104,24 @@ def _load_futures_symbols(api_url: str, default_symbol: str) -> list[str]:
 
     return list(dict.fromkeys([default_symbol, *fallback]))
 
+
+def _all_in_one_credential_preflight() -> tuple[bool, str]:
+    api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+    api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+
+    if not api_key or not api_secret:
+        return False, "KRAKEN_API_KEY/KRAKEN_API_SECRET must be set."
+
+    if any(ch.isspace() for ch in api_secret):
+        return False, "KRAKEN_API_SECRET contains whitespace; remove spaces/newlines/quotes."
+
+    try:
+        base64.b64decode(api_secret, validate=True)
+    except (binascii.Error, ValueError):
+        return False, "KRAKEN_API_SECRET is not valid base64 (padding/format mismatch)."
+
+    return True, ""
+
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
 
@@ -110,19 +137,64 @@ default_api_url = str(getattr(settings_obj, "api_base_url", "http://127.0.0.1:80
 default_ws_url = str(getattr(settings_obj, "ws_url", "ws://127.0.0.1:8000/ws/price"))
 
 default_mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
-mode_index = 0 if default_mode in {"all-in-one", "direct"} else 1
+all_in_one_modes = {"all-in-one", "all_in_one", "direct", "standalone"}
+backend_api_modes = {"backend-api", "backend_api", "api", "backend"}
+if default_mode in all_in_one_modes:
+    mode_index = 0
+elif default_mode in backend_api_modes:
+    mode_index = 1
+else:
+    mode_index = 0
 mode = st.sidebar.radio("App Mode", ["All-in-One", "Backend API"], index=mode_index)
 
+
+def _all_in_one_ready() -> bool:
+    api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+    api_secret = os.getenv("KRAKEN_API_SECRET", "").strip()
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    return bool(api_key and api_secret and database_url)
+
 if mode == "All-in-One":
-    symbol = os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
-    api_url = "all-in-one"
-    ws_url = f"kraken://{symbol}"
-    st.sidebar.caption("Using direct PostgreSQL + Kraken Futures connections.")
+    if not _all_in_one_ready():
+        st.sidebar.warning("All-in-One requires KRAKEN_API_KEY, KRAKEN_API_SECRET, and DATABASE_URL. Falling back to Backend API mode.")
+        mode = "Backend API"
+        api_url = st.sidebar.text_input("Backend URL", default_api_url)
+        ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
+    else:
+        credentials_ok, credentials_reason = _all_in_one_credential_preflight()
+        if not credentials_ok:
+            st.sidebar.warning(f"All-in-One credential preflight failed ({credentials_reason}). Falling back to Backend API mode.")
+            mode = "Backend API"
+            api_url = st.sidebar.text_input("Backend URL", default_api_url)
+            ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
+        else:
+            symbol = os.getenv("KRAKEN_FUTURES_SYMBOL", "BTC/USD:USD").strip() or "BTC/USD:USD"
+            api_url = "all-in-one"
+            ws_url = f"kraken://{symbol}"
+            st.sidebar.caption("Using direct PostgreSQL + Kraken Futures connections.")
+            try:
+                _ = get_ai_insight(api_url)
+            except Exception as exc:
+                st.sidebar.warning(f"All-in-One runtime check failed ({exc}). Falling back to Backend API mode.")
+                mode = "Backend API"
+                api_url = st.sidebar.text_input("Backend URL", default_api_url)
+                ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 else:
     api_url = st.sidebar.text_input("Backend URL", default_api_url)
     ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 
 refresh_sec = st.sidebar.slider("Refresh (sec)", 1, 30, 2)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Webhook URLs")
+if str(api_url).strip().lower() in {"all-in-one", "direct"}:
+    st.sidebar.caption("Switch to Backend API mode to use HTTP webhook endpoints.")
+else:
+    webhook_base = api_url.rstrip("/")
+    tv_url_primary = f"{webhook_base}/api/webhooks/tradingview"
+    tv_url_alias = f"{webhook_base}/webhook/tradingview"
+    st.sidebar.text_input("TradingView URL (Primary)", value=tv_url_primary, key="tv_webhook_primary")
+    st.sidebar.text_input("TradingView URL (Alias)", value=tv_url_alias, key="tv_webhook_alias")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Risk Preview")

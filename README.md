@@ -92,6 +92,46 @@ This repo includes `render.yaml` so you can deploy both services from one bluepr
 	- `DATABASE_URL` (Render Postgres recommended)
 5. Trigger deploy for both services.
 
+### Dashboard service requirements (Render)
+
+Set this env var in the Streamlit service:
+
+- `STREAMLIT_APP_MODE=all-in-one` for standalone mode
+- `STREAMLIT_APP_MODE=backend-api` when the dashboard talks to FastAPI
+
+For `all-in-one`, also set:
+
+- `DATABASE_URL`
+- `KRAKEN_API_KEY`
+- `KRAKEN_API_SECRET`
+
+Repository structure expected by `streamlit_app.py`:
+
+```text
+.
+├── streamlit_app.py
+├── requirements.txt
+├── .gitignore
+└── app/
+	├── core/
+	├── services/
+	└── ui/
+```
+
+`requirements.txt` should include at least:
+
+- `streamlit`
+- `streamlit-autorefresh`
+- `requests`
+- `httpx`
+
+`.gitignore` should exclude deployment-unsafe local files:
+
+- `.env`
+- `.venv/`
+- `*.db`
+- `logs/`
+
 ### Connect Kraken Futures Demo
 
 Use these backend environment values:
@@ -118,3 +158,8 @@ Invoke-RestMethod "$base/momentum/start?symbol=PI_XBTUSD" -Method Post
 Invoke-RestMethod "$base/momentum/status"
 Invoke-RestMethod "$base/risk/close-all" -Method Post
 ```
+
+### Render free-tier spin-down note
+
+This dashboard uses `st_autorefresh` (default every 2 seconds), but browser-side refresh does not prevent Render free-tier sleep.
+Use an external monitor (for example UptimeRobot) to ping a backend health endpoint like `/health` if you need to reduce cold starts.
