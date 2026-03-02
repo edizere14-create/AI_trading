@@ -239,7 +239,7 @@ class MomentumWorker:
                 await self.stop()
                 return
 
-            ohlcv = await self.data_service.get_ohlcv(
+            ohlcv = await self._load_ohlcv(
                 symbol=self.symbol,
                 timeframe="1h",
                 limit=50,
@@ -317,6 +317,66 @@ class MomentumWorker:
 
         except Exception as e:
             logger.error("Iteration failed: %s", e, exc_info=True)
+
+    async def _load_ohlcv(self, symbol: str, timeframe: str, limit: int):
+        """Load OHLCV candles with compatibility fallbacks across DataService versions."""
+        data_service = self.data_service
+
+        get_ohlcv_fn = getattr(data_service, "get_ohlcv", None)
+        if callable(get_ohlcv_fn):
+            return await get_ohlcv_fn(symbol=symbol, timeframe=timeframe, limit=limit)
+
+        fetch_ohlcv_fn = getattr(data_service, "fetch_ohlcv", None)
+        if callable(fetch_ohlcv_fn):
+            result = fetch_ohlcv_fn(symbol=symbol, timeframe=timeframe, limit=limit)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        logger.warning("DataService has no get_ohlcv/fetch_ohlcv; using ccxt fallback for %s", symbol)
+        return await self._load_ohlcv_via_ccxt(symbol=symbol, timeframe=timeframe, limit=limit)
+
+    async def _load_ohlcv_via_ccxt(self, symbol: str, timeframe: str, limit: int):
+        """Fallback OHLCV fetch using ccxt directly."""
+        try:
+            import ccxt
+            import pandas as pd
+        except Exception as exc:
+            raise RuntimeError(f"OHLCV fallback unavailable (missing deps): {exc}")
+
+        def _to_ccxt_symbol(raw_symbol: str) -> str:
+            raw = (raw_symbol or "").strip().upper()
+            mapping = {
+                "PI_XBTUSD": "BTC/USD:USD",
+                "PF_XBTUSD": "BTC/USD:USD",
+                "PI_ETHUSD": "ETH/USD:USD",
+                "PF_ETHUSD": "ETH/USD:USD",
+                "PI_SOLUSD": "SOL/USD:USD",
+                "PF_SOLUSD": "SOL/USD:USD",
+            }
+            if raw in mapping:
+                return mapping[raw]
+            return raw_symbol
+
+        def _fetch() -> "pd.DataFrame":
+            exchange = ccxt.krakenfutures(
+                {
+                    "apiKey": os.environ.get("KRAKEN_API_KEY", ""),
+                    "secret": os.environ.get("KRAKEN_API_SECRET", ""),
+                    "enableRateLimit": True,
+                    "timeout": 30000,
+                }
+            )
+            demo = os.environ.get("KRAKEN_FUTURES_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
+            exchange.set_sandbox_mode(demo)
+
+            ccxt_symbol = _to_ccxt_symbol(symbol)
+            rows = exchange.fetch_ohlcv(ccxt_symbol, timeframe=timeframe, limit=int(limit))
+            df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            return df
+
+        return await asyncio.to_thread(_fetch)
 
     async def _generate_signal(self, df) -> dict[str, Any] | None:
         """Generate a normalized signal dict or None."""
