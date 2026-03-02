@@ -38,6 +38,7 @@ python-multipart==0.0.9
 
 # Trading
 ccxt>=4.0.0
+python-kraken-sdk>=3.2.5
 backtrader==1.9.78.123
 
 # Dashboard
