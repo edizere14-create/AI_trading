@@ -44,4 +44,4 @@ services:
       - key: STREAMLIT_APP_MODE
         value: backend-api
       - key: PYTHON_VERSION
-        value: 3.13.11
+        value: 3.12.9
