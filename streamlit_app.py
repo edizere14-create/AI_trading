@@ -179,6 +179,11 @@ def _derive_ws_url_from_api(api_url: str) -> str:
         return f"ws://{base[len('http://'): ]}/ws/price"
     return "wss://ai-trading-engd.onrender.com/ws/price"
 
+
+def _is_local_ws_url(url: str) -> bool:
+    text = str(url or "").strip().lower()
+    return ("127.0.0.1" in text) or ("localhost" in text)
+
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
 _require_dashboard_login()
@@ -249,6 +254,10 @@ if mode == "All-in-One":
 else:
     api_url = st.sidebar.text_input("Backend URL", default_api_url)
     ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
+
+if is_production and _is_local_ws_url(ws_url):
+    ws_url = default_ws_url
+    st.sidebar.warning("Local WebSocket URL detected in production. Using Render WebSocket URL.")
 
 refresh_sec = st.sidebar.slider("Refresh (sec)", 1, 30, 2)
 
