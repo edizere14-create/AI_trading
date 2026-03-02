@@ -1,8 +1,10 @@
 # FastAPI endpoint for placing live orders
+# pyright: reportUntypedFunctionDecorator=false
+# mypy: disable-error-code=misc
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-from typing import Dict, List
+from typing import Dict, List, cast
 
 from app.schemas.trade import PlaceOrderRequest, OrderResponse, OrderHistory
 from app.services.trade_service import place_order, get_user_orders
@@ -50,7 +52,8 @@ async def get_orders(
     try:
         if user is None or user.id is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-        return await get_user_orders(db, int(user.id))
+        orders = await get_user_orders(db, int(user.id))
+        return cast(List[OrderHistory], orders)
     except HTTPException:
         raise
     except Exception:

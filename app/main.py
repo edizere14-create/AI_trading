@@ -1,4 +1,6 @@
 from __future__ import annotations
+# pyright: reportUntypedFunctionDecorator=false
+# mypy: disable-error-code=misc
 
 import asyncio
 import logging
@@ -35,7 +37,7 @@ models: TradingAIModels | None = None
 manager: ConnectionManager = ConnectionManager()
 strategy_manager: StrategyManager = StrategyManager()
 momentum_worker: Any | None = None
-momentum_task: asyncio.Task | None = None
+momentum_task: asyncio.Task[Any] | None = None
 
 # Initialize Kraken broker
 kraken_broker = KrakenBroker(
