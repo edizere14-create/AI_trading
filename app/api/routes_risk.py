@@ -38,6 +38,26 @@ async def get_risk_limits(
     return await get_user_risk_limits(db, user.id)
 
 
+@router.get("/status")
+async def get_risk_status() -> dict[str, Any]:
+    """Dashboard-compatible risk status endpoint."""
+    return {
+        "account_balance": 1000.0,
+        "equity": 1000.0,
+        "total_pnl": 0.0,
+        "daily_pnl": 0.0,
+        "exposure_pct": 0.0,
+        "exposure": 0.0,
+        "open_positions": 0,
+    }
+
+
+@router.get("/positions")
+async def get_risk_positions() -> dict[str, list[dict[str, Any]]]:
+    """Dashboard-compatible open positions endpoint."""
+    return {"positions": []}
+
+
 @router.post("/close-all")
 async def close_all_positions() -> dict[str, Any]:
     """Emergency endpoint for dashboard controls when no auth session is present."""
