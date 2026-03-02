@@ -162,6 +162,10 @@ async def health_check() -> dict[str, str | int | bool]:
 @app.websocket("/ws/{symbol}")
 async def websocket_endpoint(websocket: WebSocket, symbol: str) -> None:
     """General WebSocket endpoint for symbol updates."""
+    if str(symbol).strip().lower() == "price":
+        await websocket_price_alias(websocket)
+        return
+
     await manager.connect(websocket, symbol)
     try:
         while True:
