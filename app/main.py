@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import requests
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator
 from datetime import datetime, timezone
@@ -39,6 +40,52 @@ kraken_broker = KrakenBroker(
     api_key=os.getenv("KRAKEN_API_KEY", ""),
     api_secret=os.getenv("KRAKEN_API_SECRET", "")
 )
+
+
+def _futures_symbol_candidates(symbol: str) -> list[str]:
+    raw = (symbol or "PI_XBTUSD").strip().upper()
+    candidates = [raw]
+    if raw.startswith("PI_"):
+        candidates.append(raw.replace("PI_", "PF_", 1))
+    elif raw.startswith("PF_"):
+        candidates.append(raw.replace("PF_", "PI_", 1))
+    elif raw in {"BTCUSD", "XBTUSD"}:
+        candidates.extend(["PI_XBTUSD", "PF_XBTUSD"])
+    return list(dict.fromkeys(candidates))
+
+
+async def _fetch_kraken_public_price(symbol: str) -> float:
+    url = os.getenv("KRAKEN_BASE_URL", "https://demo-futures.kraken.com/derivatives/api/v3/").strip()
+    base = url.split("/derivatives/api/v3", 1)[0].rstrip("/")
+    endpoint = f"{base}/derivatives/api/v3/tickers"
+    candidates = _futures_symbol_candidates(symbol)
+
+    def _request() -> float:
+        response = requests.get(endpoint, timeout=4)
+        response.raise_for_status()
+        payload = response.json() if response.content else {}
+        if not isinstance(payload, dict):
+            return 0.0
+        tickers = payload.get("tickers")
+        if not isinstance(tickers, list):
+            return 0.0
+
+        for candidate in candidates:
+            for ticker in tickers:
+                if not isinstance(ticker, dict):
+                    continue
+                if str(ticker.get("symbol", "")).upper() != candidate:
+                    continue
+                for key in ("markPrice", "last", "lastTradePrice", "indexPrice"):
+                    try:
+                        price = float(ticker.get(key) or 0.0)
+                    except (TypeError, ValueError):
+                        price = 0.0
+                    if price > 0:
+                        return price
+        return 0.0
+
+    return await asyncio.to_thread(_request)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -191,6 +238,12 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
                 price = await asyncio.wait_for(kraken_broker.get_ticker(symbol), timeout=2.5)
             except Exception:
                 price = 0.0
+
+            if price <= 0:
+                try:
+                    price = await asyncio.wait_for(_fetch_kraken_public_price(symbol), timeout=3.0)
+                except Exception:
+                    price = 0.0
 
             if price <= 0:
                 try:
