@@ -40,7 +40,10 @@ services:
     branch: streamlit-deploy
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run dashboard/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
+    startCommand: >-
+      bash -lc 'PROJECT_ROOT="${RENDER_PROJECT_ROOT:-/opt/render/project/src}";
+      export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH}";
+      streamlit run "$PROJECT_ROOT/dashboard/streamlit_app.py" --server.port "$PORT" --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false'
     healthCheckPath: /
     envVars:
       - key: ENVIRONMENT
