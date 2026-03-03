@@ -72,12 +72,14 @@ class MomentumWorker:
             self.execution_engine = execution_engine
         else:
              # Fallback if not provided
+            paper_mode = self._env_bool("TRADING_PAPER_MODE", True)
+            sandbox_mode = self._env_bool("KRAKEN_FUTURES_DEMO", True)
             self.execution_engine = ExecutionEngine(
                 exchange_id="krakenfutures",
                 api_key=os.environ.get("KRAKEN_API_KEY", ""),
                 api_secret=os.environ.get("KRAKEN_API_SECRET", ""),
-                paper_mode=True, 
-                sandbox=True
+                paper_mode=paper_mode,
+                sandbox=sandbox_mode,
             )
 
         # 2. Setup Data Service
@@ -96,6 +98,12 @@ class MomentumWorker:
         self.account_balance = account_balance
         
         self.max_trades = 10  # <--- Add this line back
+        self.live_maker_only = self._env_bool("MOMENTUM_LIVE_MAKER_ONLY", True)
+        try:
+            self.live_maker_offset_bps = float(os.environ.get("MOMENTUM_LIVE_MAKER_OFFSET_BPS", "8") or "8")
+        except (TypeError, ValueError):
+            self.live_maker_offset_bps = 8.0
+        self.live_maker_offset_bps = max(0.0, min(self.live_maker_offset_bps, 500.0))
         
         self.strategy = MomentumStrategy(
             symbol=symbol,
@@ -126,6 +134,13 @@ class MomentumWorker:
         self.signal_history: deque[dict[str, Any]] = deque(maxlen=2000)
         self.trade_history: deque[dict[str, Any]] = deque(maxlen=2000)
 
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
     def _interval_seconds(self) -> float:
         v = self.interval
         if isinstance(v, (int, float)):
@@ -143,6 +158,58 @@ class MomentumWorker:
             if s.endswith("h"):
                 return float(s[:-1]) * 3600.0
         return 60.0
+
+    def _reference_price(self, signal: Dict[str, Any]) -> float | None:
+        try:
+            value = float(signal.get("price", 0.0) or 0.0)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+        if self.candle_history:
+            last = self.candle_history[-1]
+            if isinstance(last, dict):
+                try:
+                    close = float(last.get("close", 0.0) or 0.0)
+                    if close > 0:
+                        return close
+                except (TypeError, ValueError):
+                    pass
+
+        return None
+
+    def _apply_live_order_preferences(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        if getattr(self.execution_engine, "paper_mode", True):
+            return signal
+        if not self.live_maker_only:
+            return signal
+
+        side = str(signal.get("side", "")).lower()
+        if side not in {"buy", "sell"}:
+            return signal
+
+        reference_price = self._reference_price(signal)
+        if reference_price is None or reference_price <= 0:
+            logger.warning("Skipping maker preference; no valid reference price in signal=%s", signal)
+            return signal
+
+        offset = self.live_maker_offset_bps / 10_000.0
+        maker_price = reference_price * (1.0 - offset) if side == "buy" else reference_price * (1.0 + offset)
+
+        signal["order_kind"] = "maker"
+        signal["order_type"] = "limit"
+        signal["expected_price"] = signal.get("expected_price") or reference_price
+        signal["price"] = float(maker_price)
+
+        logger.info(
+            "Applied live maker preference | side=%s ref=%.2f maker=%.2f offset_bps=%.1f",
+            side,
+            reference_price,
+            signal["price"],
+            self.live_maker_offset_bps,
+        )
+        return signal
 
     def _cache_candles(self, candles: Any) -> None:
         try:
@@ -276,6 +343,8 @@ class MomentumWorker:
 
             if "quantity" not in signal or float(signal.get("quantity", 0)) <= 0:
                 signal["quantity"] = 0.001
+
+            signal = self._apply_live_order_preferences(signal)
 
             side = str(signal.get("side", "")).lower()
             symbol = str(signal.get("symbol", self.symbol))

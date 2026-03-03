@@ -183,6 +183,12 @@ class ExecutionEngine:
 
             market = self.exchange.market(symbol)
 
+            if order_type == "limit" and price is not None:
+                try:
+                    price = float(self.exchange.price_to_precision(symbol, price))
+                except Exception as exc:
+                    logger.warning("Could not normalize limit price precision for %s: %s", symbol, exc)
+
             # Futures exchanges (e.g., krakenfutures) expect contract units for amount.
             if market.get("contract"):
                 contract_size = float(market.get("contractSize") or 1.0)
@@ -270,6 +276,22 @@ class ExecutionEngine:
                     final_status = OrderStatus.FILLED.value
                     break
 
+                if order_kind == "maker":
+                    # Keep post-only maker orders resting on book so they remain visible in open orders.
+                    if status in ("open", "new", "pending", "submitted"):
+                        final_status = OrderStatus.PARTIAL.value if total_filled > 0 else OrderStatus.SUBMITTED.value
+                        break
+                    if status in ("canceled", "cancelled", "rejected", "expired"):
+                        final_status = OrderStatus.CANCELLED.value
+                        break
+                    if status in ("closed", "filled"):
+                        final_status = (
+                            OrderStatus.FILLED.value if total_filled >= amount else OrderStatus.PARTIAL.value
+                        )
+                        break
+                    final_status = OrderStatus.PARTIAL.value if total_filled > 0 else OrderStatus.SUBMITTED.value
+                    break
+
                 if status in ("canceled", "rejected", "expired"):
                     final_status = OrderStatus.CANCELLED.value
                     continue
@@ -285,7 +307,10 @@ class ExecutionEngine:
             avg_fill_price = (total_cost / total_filled) if total_filled > 0 else None
             if total_filled > 0 and total_filled < amount:
                 final_status = OrderStatus.PARTIAL.value
-            elif total_filled <= 0:
+            elif total_filled <= 0 and final_status not in (
+                OrderStatus.SUBMITTED.value,
+                OrderStatus.CANCELLED.value,
+            ):
                 final_status = OrderStatus.REJECTED.value
 
             metrics = self._compute_metrics(
@@ -303,12 +328,6 @@ class ExecutionEngine:
                 metrics.get("fill_rate"),
                 metrics.get("latency_ms"),
             )
-
-            # before returning result dict
-            resolved_fill = avg_fill_price or price or expected_price or signal.get("price")
-            if resolved_fill is not None:
-                result["avg_fill_price"] = float(resolved_fill)
-                result["price"] = float(resolved_fill)
 
             result = {
                 "id": last_order.get("id") if last_order else None,
