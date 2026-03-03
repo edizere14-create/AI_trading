@@ -21,6 +21,13 @@ fallback_is_running = False
 fallback_symbol = "PI_XBTUSD"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _fallback_analytics(reason: str = "Waiting for market data...") -> dict[str, Any]:
     return {
         "bias": "NEUTRAL",
@@ -148,12 +155,15 @@ def _build_momentum_worker(symbol: str):
     from engine.core.execution_engine import ExecutionEngine
     from engine.workers.momentum_worker import MomentumWorker
 
+    paper_mode = _env_bool("TRADING_PAPER_MODE", True)
+    sandbox_mode = _env_bool("KRAKEN_FUTURES_DEMO", True)
+
     execution_engine = ExecutionEngine(
         exchange_id="krakenfutures",
         api_key=os.getenv("KRAKEN_API_KEY", ""),
         api_secret=os.getenv("KRAKEN_API_SECRET", ""),
-        paper_mode=True,
-        sandbox=True,
+        paper_mode=paper_mode,
+        sandbox=sandbox_mode,
     )
     data_service = DataService()
     return MomentumWorker(
