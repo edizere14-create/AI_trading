@@ -166,27 +166,28 @@ async def get_risk_status_route() -> dict[str, Any]:
     """
     Fetches real-time risk-service health + dashboard-compatible snapshot fields.
     """
+    snapshot: dict[str, Any] = {
+        "risk_service": "offline",
+        "timestamp": _utc_now(),
+        "account_balance": DEFAULT_ACCOUNT_EQUITY,
+        "equity": DEFAULT_ACCOUNT_EQUITY,
+        "total_pnl": 0.0,
+        "daily_pnl": 0.0,
+        "exposure_pct": 0.0,
+        "exposure": 0.0,
+        "open_positions": 0,
+    }
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{RISK_MICROSERVICE_URL}/health")
 
         if response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Risk service unhealthy",
-            )
+            snapshot["risk_service"] = "degraded"
+            snapshot["detail"] = "Risk service unhealthy"
+            return snapshot
 
-        snapshot: dict[str, Any] = {
-            "risk_service": "online",
-            "timestamp": _utc_now(),
-            "account_balance": DEFAULT_ACCOUNT_EQUITY,
-            "equity": DEFAULT_ACCOUNT_EQUITY,
-            "total_pnl": 0.0,
-            "daily_pnl": 0.0,
-            "exposure_pct": 0.0,
-            "exposure": 0.0,
-            "open_positions": 0,
-        }
+        snapshot["risk_service"] = "online"
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -205,15 +206,17 @@ async def get_risk_status_route() -> dict[str, Any]:
                     ):
                         if key in payload:
                             snapshot[key] = payload[key]
+            else:
+                snapshot["risk_service"] = "degraded"
+                snapshot["detail"] = "Risk service status endpoint unavailable"
         except httpx.RequestError:
-            pass
+            snapshot["risk_service"] = "degraded"
+            snapshot["detail"] = "Risk service status endpoint unreachable"
 
         return snapshot
     except httpx.RequestError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Risk service unreachable",
-        )
+        snapshot["detail"] = "Risk service unreachable"
+        return snapshot
 
 
 @router.get(
