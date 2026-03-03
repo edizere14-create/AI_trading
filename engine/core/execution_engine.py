@@ -125,6 +125,68 @@ class ExecutionEngine:
     def _fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         return self.exchange.fetch_order(order_id, symbol)
 
+    def _market_symbol_by_id(self, market_id: str) -> str | None:
+        if self.exchange is None:
+            return None
+        markets_by_id = getattr(self.exchange, "markets_by_id", None) or {}
+        target = str(market_id or "").strip().upper()
+        if not target:
+            return None
+        for key, market in markets_by_id.items():
+            if str(key).strip().upper() != target:
+                continue
+            if isinstance(market, list):
+                market = market[0] if market else None
+            if isinstance(market, dict):
+                symbol = market.get("symbol")
+                if symbol:
+                    return str(symbol)
+        return None
+
+    def _resolve_exchange_symbol(self, symbol: str) -> str:
+        if self.exchange is None:
+            return symbol
+
+        raw = str(symbol or "").strip()
+        if not raw:
+            return symbol
+
+        markets = getattr(self.exchange, "markets", None) or {}
+        if raw in markets:
+            return raw
+
+        by_id_symbol = self._market_symbol_by_id(raw)
+        if by_id_symbol:
+            return by_id_symbol
+
+        upper = raw.upper()
+        static_aliases = {
+            "PI_XBTUSD": "BTC/USD:USD",
+            "PF_XBTUSD": "BTC/USD:USD",
+            "PI_ETHUSD": "ETH/USD:USD",
+            "PF_ETHUSD": "ETH/USD:USD",
+            "PI_SOLUSD": "SOL/USD:USD",
+            "PF_SOLUSD": "SOL/USD:USD",
+            "XBTUSD": "BTC/USD:USD",
+            "BTCUSD": "BTC/USD:USD",
+            "ETHUSD": "ETH/USD:USD",
+            "SOLUSD": "SOL/USD:USD",
+        }
+        alias = static_aliases.get(upper)
+        if alias and alias in markets:
+            return alias
+
+        if upper.startswith("PI_"):
+            by_id_symbol = self._market_symbol_by_id(upper.replace("PI_", "PF_", 1))
+            if by_id_symbol:
+                return by_id_symbol
+        if upper.startswith("PF_"):
+            by_id_symbol = self._market_symbol_by_id(upper.replace("PF_", "PI_", 1))
+            if by_id_symbol:
+                return by_id_symbol
+
+        raise ValueError(f"Unknown exchange symbol: {symbol}")
+
     async def execute_signal(self, signal: Dict[str, Any]) -> Dict[str, Any] | None:
         """Async wrapper for execute()."""
         return await asyncio.to_thread(self.execute, signal)
@@ -177,24 +239,28 @@ class ExecutionEngine:
                 logger.error("Live execution requested but exchange client is not initialized")
                 return None
 
+            exchange_symbol = self._resolve_exchange_symbol(symbol)
+            if exchange_symbol != symbol:
+                logger.info("Resolved execution symbol %s -> %s", symbol, exchange_symbol)
+
             if order_type == "limit" and price is None:
                 logger.error("Limit (maker) order requires price")
                 return None
 
-            market = self.exchange.market(symbol)
+            market = self.exchange.market(exchange_symbol)
 
             if order_type == "limit" and price is not None:
                 try:
-                    price = float(self.exchange.price_to_precision(symbol, price))
+                    price = float(self.exchange.price_to_precision(exchange_symbol, price))
                 except Exception as exc:
-                    logger.warning("Could not normalize limit price precision for %s: %s", symbol, exc)
+                    logger.warning("Could not normalize limit price precision for %s: %s", exchange_symbol, exc)
 
             # Futures exchanges (e.g., krakenfutures) expect contract units for amount.
             if market.get("contract"):
                 contract_size = float(market.get("contractSize") or 1.0)
                 ref_price = price
                 if ref_price is None:
-                    ticker = self.exchange.fetch_ticker(symbol)
+                    ticker = self.exchange.fetch_ticker(exchange_symbol)
                     ref_price = float(ticker.get("last") or 0)
                 if ref_price <= 0:
                     logger.error("Could not determine reference price for contract sizing")
@@ -205,20 +271,20 @@ class ExecutionEngine:
                     "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s)",
                     amount,
                     contracts,
-                    symbol,
+                    exchange_symbol,
                     contract_size,
                     ref_price,
                 )
                 amount = float(contracts)
 
-            amount = float(self.exchange.amount_to_precision(symbol, amount))
+            amount = float(self.exchange.amount_to_precision(exchange_symbol, amount))
             if amount <= 0:
-                logger.error("Order amount rounded to zero for %s", symbol)
+                logger.error("Order amount rounded to zero for %s", exchange_symbol)
                 return None
 
             if expected_price is None:
                 try:
-                    ticker = self.exchange.fetch_ticker(symbol)
+                    ticker = self.exchange.fetch_ticker(exchange_symbol)
                     expected_price = float(ticker.get("last") or 0) or None
                 except Exception:
                     expected_price = price
@@ -235,7 +301,7 @@ class ExecutionEngine:
                     break
 
                 order = self._submit_order(
-                    symbol=symbol,
+                    symbol=exchange_symbol,
                     side=side,
                     amount=remaining,
                     order_type=order_type,
@@ -250,7 +316,7 @@ class ExecutionEngine:
                     self.max_retries,
                     side.upper(),
                     remaining,
-                    symbol,
+                    exchange_symbol,
                     order_type.upper(),
                     order.get("id"),
                 )
@@ -258,7 +324,7 @@ class ExecutionEngine:
                 time.sleep(self.retry_sleep_sec)
 
                 try:
-                    fetched = self._fetch_order(order["id"], symbol)
+                    fetched = self._fetch_order(order["id"], exchange_symbol)
                 except Exception as exc:
                     logger.warning("fetch_order not supported; using create_order response: %s", exc)
                     fetched = order
@@ -299,7 +365,7 @@ class ExecutionEngine:
                 # Partial or open: cancel and retry remainder
                 if remaining > 0:
                     try:
-                        self.exchange.cancel_order(fetched["id"], symbol)
+                        self.exchange.cancel_order(fetched["id"], exchange_symbol)
                     except Exception as exc:
                         logger.warning("Cancel failed for %s: %s", fetched.get("id"), exc)
 
@@ -333,6 +399,7 @@ class ExecutionEngine:
                 "id": last_order.get("id") if last_order else None,
                 "status": final_status,
                 "symbol": symbol,
+                "exchange_symbol": exchange_symbol,
                 "side": side,
                 "quantity": amount,
                 "filled": total_filled,
