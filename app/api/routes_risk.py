@@ -35,6 +35,121 @@ def _parse_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_momentum_worker() -> Any | None:
+    try:
+        from app.api import routes_momentum
+
+        return getattr(routes_momentum, "momentum_worker", None)
+    except Exception:
+        return None
+
+
+def _worker_positions_snapshot() -> list[dict[str, Any]]:
+    worker = _get_momentum_worker()
+    if worker is None:
+        return []
+
+    risk_manager = getattr(worker, "risk_manager", None)
+    if risk_manager is None:
+        return []
+
+    positions = getattr(risk_manager, "positions", {})
+    if not isinstance(positions, dict):
+        return []
+
+    last_price = None
+    signal = getattr(worker, "last_signal", None)
+    if isinstance(signal, dict):
+        last_price = _safe_float(signal.get("price"), 0.0)
+    if not last_price:
+        candles = list(getattr(worker, "candle_history", []))
+        if candles and isinstance(candles[-1], dict):
+            last_price = _safe_float(candles[-1].get("close"), 0.0)
+
+    rows: list[dict[str, Any]] = []
+    for symbol, pos in positions.items():
+        if not isinstance(pos, dict):
+            continue
+        side = str(pos.get("side", "buy") or "buy").lower()
+        quantity = _safe_float(pos.get("quantity"), 0.0)
+        entry_price = _safe_float(pos.get("entry_price"), 0.0)
+        if quantity <= 0 or entry_price <= 0:
+            continue
+
+        current_price = float(last_price) if last_price and last_price > 0 else entry_price
+        unrealized = (
+            (current_price - entry_price) * quantity
+            if side == "buy"
+            else (entry_price - current_price) * quantity
+        )
+
+        rows.append(
+            {
+                "symbol": str(symbol),
+                "side": side,
+                "quantity": quantity,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized,
+                "leverage": 1.0,
+                "source": "worker",
+            }
+        )
+
+    return rows
+
+
+def _worker_risk_snapshot() -> dict[str, Any] | None:
+    worker = _get_momentum_worker()
+    if worker is None:
+        return None
+
+    risk_manager = getattr(worker, "risk_manager", None)
+    if risk_manager is None:
+        return None
+
+    account_balance = _safe_float(getattr(risk_manager, "account_balance", DEFAULT_ACCOUNT_EQUITY), DEFAULT_ACCOUNT_EQUITY)
+    total_pnl = _safe_float(getattr(risk_manager, "total_pnl", 0.0), 0.0)
+    daily_pnl = _safe_float(getattr(risk_manager, "daily_pnl", 0.0), 0.0)
+    positions = _worker_positions_snapshot()
+
+    exposure = sum(
+        _safe_float(p.get("quantity"), 0.0) * _safe_float(p.get("current_price"), 0.0)
+        for p in positions
+    )
+    exposure_pct = (exposure / account_balance * 100.0) if account_balance > 0 else 0.0
+
+    return {
+        "account_balance": account_balance,
+        "equity": account_balance,
+        "total_pnl": total_pnl,
+        "daily_pnl": daily_pnl,
+        "exposure_pct": exposure_pct,
+        "exposure": exposure,
+        "open_positions": len(positions),
+    }
+
+
+def _apply_worker_fallback(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if snapshot.get("risk_service") == "online":
+        return snapshot
+
+    worker_snapshot = _worker_risk_snapshot()
+    if not worker_snapshot:
+        return snapshot
+
+    snapshot.update(worker_snapshot)
+    snapshot["risk_service"] = "worker-fallback"
+    return snapshot
+
+
 RISK_MICROSERVICE_URL = str(getattr(settings, "RISK_SERVICE_URL", "http://risk-service:8000")).rstrip("/")
 TRADING_ENABLED = _parse_bool(getattr(settings, "TRADING_ENABLED", True), default=True)
 DEFAULT_ACCOUNT_EQUITY = float(getattr(settings, "DEFAULT_ACCOUNT_EQUITY", 1000.0) or 1000.0)
@@ -185,7 +300,7 @@ async def get_risk_status_route() -> dict[str, Any]:
         if response.status_code != 200:
             snapshot["risk_service"] = "degraded"
             snapshot["detail"] = "Risk service unhealthy"
-            return snapshot
+            return _apply_worker_fallback(snapshot)
 
         snapshot["risk_service"] = "online"
 
@@ -213,10 +328,10 @@ async def get_risk_status_route() -> dict[str, Any]:
             snapshot["risk_service"] = "degraded"
             snapshot["detail"] = "Risk service status endpoint unreachable"
 
-        return snapshot
+        return _apply_worker_fallback(snapshot)
     except httpx.RequestError:
         snapshot["detail"] = "Risk service unreachable"
-        return snapshot
+        return _apply_worker_fallback(snapshot)
 
 
 @router.get(
@@ -231,7 +346,7 @@ async def get_risk_positions_route() -> dict[str, list[dict[str, Any]]]:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{RISK_MICROSERVICE_URL}/positions")
         if response.status_code != 200:
-            return {"positions": []}
+            return {"positions": _worker_positions_snapshot()}
 
         payload = response.json() if response.content else []
         if isinstance(payload, dict):
@@ -242,7 +357,7 @@ async def get_risk_positions_route() -> dict[str, list[dict[str, Any]]]:
     except httpx.RequestError:
         pass
 
-    return {"positions": []}
+    return {"positions": _worker_positions_snapshot()}
 
 
 @router.post(

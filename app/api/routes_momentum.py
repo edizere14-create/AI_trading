@@ -40,6 +40,109 @@ def _finite_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _latest_worker_price() -> float | None:
+    global momentum_worker
+    if momentum_worker is None:
+        return None
+
+    try:
+        candles = list(getattr(momentum_worker, "candle_history", []))
+    except Exception:
+        candles = []
+    if candles:
+        last = candles[-1]
+        if isinstance(last, dict):
+            price = _finite_or_none(last.get("close"))
+            if price is not None and price > 0:
+                return price
+
+    signal = getattr(momentum_worker, "last_signal", None)
+    if isinstance(signal, dict):
+        price = _finite_or_none(signal.get("price"))
+        if price is not None and price > 0:
+            return price
+
+    return None
+
+
+def _worker_signals(limit: int = 50) -> list[dict[str, Any]]:
+    global momentum_worker
+    if momentum_worker is None:
+        return []
+
+    raw = list(getattr(momentum_worker, "signal_history", []))[-limit:]
+    out: list[dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("side", row.get("action", "")) or "").strip().lower()
+        if side not in {"buy", "sell"}:
+            continue
+        out.append(
+            {
+                "side": side,
+                "timestamp": row.get("timestamp"),
+                "price": _finite_or_none(
+                    row.get("avg_fill_price", row.get("price", row.get("entry_price")))
+                ),
+            }
+        )
+    return out
+
+
+def _worker_analytics() -> dict[str, Any]:
+    global momentum_worker
+    if momentum_worker is None:
+        return _fallback_analytics()
+
+    last_signal = getattr(momentum_worker, "last_signal", None)
+    if not isinstance(last_signal, dict):
+        return {
+            "bias": "NEUTRAL",
+            "confidence": 0.0,
+            "vol_forecast": None,
+            "pattern_summary": "Worker warmup",
+            "why_trade": "Momentum worker is running and waiting for first signal.",
+            "signals": _worker_signals(),
+        }
+
+    momentum_value = _finite_or_none(last_signal.get("momentum")) or 0.0
+    side = str(last_signal.get("side", last_signal.get("action", "neutral")) or "").strip().lower()
+
+    if side == "buy":
+        bias = "BUY"
+    elif side == "sell":
+        bias = "SELL"
+    else:
+        bias = "NEUTRAL"
+
+    confidence = min(99.0, max(5.0, abs(momentum_value) * 20.0))
+
+    try:
+        candles = pd.DataFrame(list(getattr(momentum_worker, "candle_history", [])))
+        close = pd.to_numeric(candles.get("close"), errors="coerce").dropna()
+        if len(close) >= 20:
+            vol_forecast = _finite_or_none(close.pct_change().dropna().tail(60).std() * (24 * 365) ** 0.5)
+        else:
+            vol_forecast = None
+    except Exception:
+        vol_forecast = None
+
+    signal_price = _finite_or_none(last_signal.get("price"))
+    price_text = f" price={signal_price:.2f}" if signal_price is not None else ""
+    pattern_summary = f"Worker signal: {side or 'neutral'} momentum={momentum_value:.3f}%{price_text}"
+    why_trade = "Derived from running MomentumWorker signal stream."
+
+    return {
+        "bias": bias,
+        "confidence": _finite_or_none(confidence),
+        "vol_forecast": vol_forecast,
+        "pattern_summary": pattern_summary,
+        "why_trade": why_trade,
+        "signals": _worker_signals(),
+    }
+
+
 def _build_momentum_worker(symbol: str):
     from app.services.data_service import DataService
     from engine.core.execution_engine import ExecutionEngine
@@ -119,12 +222,15 @@ async def stop_momentum() -> dict[str, Any]:
 async def get_momentum_status() -> dict[str, Any]:
     global momentum_worker, startup_error, fallback_is_running, fallback_symbol
     if momentum_worker is None:
+        ai = _fallback_analytics("Momentum worker not initialized.")
         return {
             "is_running": fallback_is_running,
             "symbol": fallback_symbol,
             "startup_error": startup_error,
             "signal_count": 0,
             "execution_count": 0,
+            "ai": ai,
+            "analytics": ai,
             "risk": {
                 "account_balance": 0.0,
                 "drawdown_pct": 0.0,
@@ -136,12 +242,24 @@ async def get_momentum_status() -> dict[str, Any]:
 
     status = momentum_worker.get_status()
     if isinstance(status, dict):
+        ai = _worker_analytics()
+        status["ai"] = ai
+        status["analytics"] = ai
+        status["confidence"] = ai.get("confidence", 0.0)
+        status["bias"] = ai.get("bias", "NEUTRAL")
+        price = _latest_worker_price()
+        if price is not None:
+            status["last_price"] = price
         return status
+
+    ai = _fallback_analytics("Momentum status unavailable.")
     return {
         "is_running": False,
         "symbol": "PI_XBTUSD",
         "signal_count": 0,
         "execution_count": 0,
+        "ai": ai,
+        "analytics": ai,
         "risk": {
             "account_balance": 0.0,
             "drawdown_pct": 0.0,
@@ -165,7 +283,11 @@ async def get_momentum_history(limit: int = Query(50, ge=1, le=500)) -> dict[str
 
 @router.get("/analytics")
 async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, Any]:
+    global momentum_worker
     exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
+
+    if momentum_worker is not None:
+        return _worker_analytics()
 
     try:
         from app.services.data_service import DataService
