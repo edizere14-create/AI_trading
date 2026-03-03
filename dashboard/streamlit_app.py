@@ -29,6 +29,9 @@ from app.ui.data_client import (
 from app.ui.theme import apply_theme
 
 HTTP_TIMEOUT_SEC = 3
+PRODUCTION_API_URL = "https://ai-trading-ujr3.onrender.com"
+PRODUCTION_WS_URL = "wss://ai-trading-ujr3.onrender.com/ws/price"
+LEGACY_BACKEND_HOSTS = {"127.0.0.1", "localhost", "ai-trading-backend-2pk1.onrender.com"}
 RISK_PER_TRADE_MIN = 0.01
 RISK_PER_TRADE_MAX = 0.02
 DEFAULT_RISK_PER_TRADE = 0.015
@@ -204,12 +207,12 @@ def _derive_ws_url_from_api(api_url: str) -> str:
         return f"wss://{base[len('https://'): ]}/ws/price"
     if base.startswith("http://"):
         return f"ws://{base[len('http://'): ]}/ws/price"
-    return "wss://ai-trading-engd.onrender.com/ws/price"
+    return PRODUCTION_WS_URL
 
 
-def _is_local_ws_url(url: str) -> bool:
+def _is_local_or_legacy_url(url: str) -> bool:
     text = str(url or "").strip().lower()
-    return ("127.0.0.1" in text) or ("localhost" in text)
+    return any(host in text for host in LEGACY_BACKEND_HOSTS)
 
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
@@ -223,12 +226,15 @@ page = st.sidebar.radio(
 )
 
 settings_obj = cast(Any, settings)
-default_api_url = os.getenv("API_BASE_URL", str(getattr(settings_obj, "api_base_url", "http://localhost:8000"))).strip()
+default_api_url = os.getenv("API_BASE_URL", str(getattr(settings_obj, "api_base_url", PRODUCTION_API_URL))).strip()
+if (not default_api_url) or _is_local_or_legacy_url(default_api_url):
+    default_api_url = PRODUCTION_API_URL
+
 configured_ws_url = os.getenv("WS_URL", str(getattr(settings_obj, "ws_url", ""))).strip()
-if configured_ws_url and "127.0.0.1" not in configured_ws_url and "localhost" not in configured_ws_url:
+if configured_ws_url and not _is_local_or_legacy_url(configured_ws_url):
     default_ws_url = configured_ws_url
 else:
-    default_ws_url = "ws://localhost:8000/ws/price"
+    default_ws_url = _derive_ws_url_from_api(default_api_url)
 
 default_mode = os.getenv("STREAMLIT_APP_MODE", "backend-api").strip().lower()
 env_is_production = os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
@@ -284,7 +290,7 @@ else:
     ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 
 is_remote_backend = str(api_url).strip().lower().startswith("https://") or ("onrender.com" in str(api_url).strip().lower())
-if _is_local_ws_url(ws_url) and (is_production or is_remote_backend):
+if _is_local_or_legacy_url(ws_url) and (is_production or is_remote_backend):
     ws_url = _derive_ws_url_from_api(api_url)
     st.sidebar.warning("Local WebSocket URL detected with remote backend. Using remote WebSocket URL.")
 

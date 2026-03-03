@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = "http://localhost:3000"
     TRADING_MODE: str = "kraken"
     REDIS_URL: str = "redis://localhost:6379/0"
-    API_BASE_URL: str = "http://127.0.0.1:8000"
-    WS_URL: str = "ws://127.0.0.1:8000/ws/price"
+    API_BASE_URL: str = "https://ai-trading-ujr3.onrender.com"
+    WS_URL: str = "wss://ai-trading-ujr3.onrender.com/ws/price"
     HTTP_TIMEOUT_SEC: int = 3
     USE_MOCK_IF_OFFLINE: bool = True
 
