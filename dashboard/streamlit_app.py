@@ -29,9 +29,10 @@ from app.ui.data_client import (
 from app.ui.theme import apply_theme
 
 HTTP_TIMEOUT_SEC = 3
-PRODUCTION_API_URL = "https://ai-trading-ujr3.onrender.com"
-PRODUCTION_WS_URL = "wss://ai-trading-ujr3.onrender.com/ws/price"
-LEGACY_BACKEND_HOSTS = {"127.0.0.1", "localhost", "ai-trading-backend-2pk1.onrender.com"}
+INTERNAL_API_URL = "http://127.0.0.1:8000"
+INTERNAL_WS_URL = "ws://127.0.0.1:8000/ws/price"
+UI_ONLY_HOSTS = {"ai-trading-ujr3.onrender.com", "ai-trading-engd.onrender.com"}
+LOCAL_HOST_HINTS = {"127.0.0.1", "localhost"}
 RISK_PER_TRADE_MIN = 0.01
 RISK_PER_TRADE_MAX = 0.02
 DEFAULT_RISK_PER_TRADE = 0.015
@@ -207,12 +208,17 @@ def _derive_ws_url_from_api(api_url: str) -> str:
         return f"wss://{base[len('https://'): ]}/ws/price"
     if base.startswith("http://"):
         return f"ws://{base[len('http://'): ]}/ws/price"
-    return PRODUCTION_WS_URL
+    return INTERNAL_WS_URL
 
 
-def _is_local_or_legacy_url(url: str) -> bool:
+def _is_local_url(url: str) -> bool:
     text = str(url or "").strip().lower()
-    return any(host in text for host in LEGACY_BACKEND_HOSTS)
+    return any(host in text for host in LOCAL_HOST_HINTS)
+
+
+def _is_ui_only_url(url: str) -> bool:
+    text = str(url or "").strip().lower()
+    return any(host in text for host in UI_ONLY_HOSTS)
 
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
@@ -226,12 +232,12 @@ page = st.sidebar.radio(
 )
 
 settings_obj = cast(Any, settings)
-default_api_url = os.getenv("API_BASE_URL", str(getattr(settings_obj, "api_base_url", PRODUCTION_API_URL))).strip()
-if (not default_api_url) or _is_local_or_legacy_url(default_api_url):
-    default_api_url = PRODUCTION_API_URL
+default_api_url = os.getenv("API_BASE_URL", str(getattr(settings_obj, "api_base_url", INTERNAL_API_URL))).strip()
+if (not default_api_url) or _is_ui_only_url(default_api_url):
+    default_api_url = INTERNAL_API_URL
 
 configured_ws_url = os.getenv("WS_URL", str(getattr(settings_obj, "ws_url", ""))).strip()
-if configured_ws_url and not _is_local_or_legacy_url(configured_ws_url):
+if configured_ws_url and not _is_ui_only_url(configured_ws_url):
     default_ws_url = configured_ws_url
 else:
     default_ws_url = _derive_ws_url_from_api(default_api_url)
@@ -289,8 +295,15 @@ else:
     api_url = st.sidebar.text_input("Backend URL", default_api_url)
     ws_url = st.sidebar.text_input("WebSocket URL", default_ws_url)
 
+if _is_ui_only_url(api_url):
+    api_url = INTERNAL_API_URL
+    st.sidebar.warning("UI URL detected in Backend URL. Using internal API URL: http://127.0.0.1:8000")
+
 is_remote_backend = str(api_url).strip().lower().startswith("https://") or ("onrender.com" in str(api_url).strip().lower())
-if _is_local_or_legacy_url(ws_url) and (is_production or is_remote_backend):
+if _is_ui_only_url(ws_url):
+    ws_url = _derive_ws_url_from_api(api_url)
+    st.sidebar.warning("UI URL detected in WebSocket URL. Using API-matched WebSocket URL.")
+elif _is_local_url(ws_url) and is_remote_backend:
     ws_url = _derive_ws_url_from_api(api_url)
     st.sidebar.warning("Local WebSocket URL detected with remote backend. Using remote WebSocket URL.")
 
