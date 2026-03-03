@@ -51,7 +51,106 @@ def _get_momentum_worker() -> Any | None:
         return None
 
 
-def _worker_positions_snapshot() -> list[dict[str, Any]]:
+def _worker_exchange_snapshot(include_open_orders: bool = True) -> dict[str, list[dict[str, Any]]]:
+    worker = _get_momentum_worker()
+    if worker is None:
+        return {"positions": [], "open_orders": []}
+
+    execution_engine = getattr(worker, "execution_engine", None)
+    if execution_engine is None or _parse_bool(getattr(execution_engine, "paper_mode", True), default=True):
+        return {"positions": [], "open_orders": []}
+
+    exchange = getattr(execution_engine, "exchange", None)
+    if exchange is None:
+        return {"positions": [], "open_orders": []}
+
+    positions_rows: list[dict[str, Any]] = []
+    open_order_rows: list[dict[str, Any]] = []
+
+    try:
+        raw_positions = exchange.fetch_positions()
+        for pos in raw_positions or []:
+            contracts = _safe_float(pos.get("contracts"), 0.0)
+            if contracts == 0:
+                continue
+
+            side_raw = str(pos.get("side") or "").lower()
+            side = "buy" if side_raw in {"long", "buy"} or contracts > 0 else "sell"
+            entry_price = _safe_float(pos.get("entryPrice"), 0.0)
+            current_price = _safe_float(pos.get("markPrice"), entry_price if entry_price > 0 else 0.0)
+            if current_price <= 0:
+                current_price = entry_price
+            if entry_price <= 0:
+                entry_price = current_price
+
+            symbol = str(pos.get("id") or pos.get("symbol") or "")
+            unrealized = _safe_float(pos.get("unrealizedPnl"), 0.0)
+            if not unrealized and current_price > 0 and entry_price > 0:
+                qty = abs(contracts)
+                unrealized = (
+                    (current_price - entry_price) * qty
+                    if side == "buy"
+                    else (entry_price - current_price) * qty
+                )
+
+            positions_rows.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": abs(contracts),
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl": unrealized,
+                    "leverage": _safe_float(pos.get("leverage"), 0.0),
+                    "source": "exchange",
+                    "status": "open",
+                }
+            )
+    except Exception:
+        # Fall back to risk-manager memory snapshot if exchange pull fails.
+        positions_rows = []
+
+    if include_open_orders:
+        try:
+            raw_orders = exchange.fetch_open_orders()
+            for order in raw_orders or []:
+                side = str(order.get("side") or "").lower()
+                if side not in {"buy", "sell"}:
+                    continue
+
+                qty = _safe_float(order.get("remaining"), 0.0)
+                if qty <= 0:
+                    qty = _safe_float(order.get("amount"), 0.0)
+                if qty <= 0:
+                    continue
+
+                price = _safe_float(order.get("price"), 0.0)
+                symbol = str(order.get("symbol") or "")
+                info = order.get("info")
+                if isinstance(info, dict):
+                    symbol = str(info.get("symbol") or symbol)
+
+                open_order_rows.append(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "quantity": abs(qty),
+                        "entry_price": price,
+                        "current_price": price,
+                        "unrealized_pnl": 0.0,
+                        "leverage": 0.0,
+                        "source": "open_order",
+                        "status": "open_order",
+                        "order_id": str(order.get("id") or ""),
+                    }
+                )
+        except Exception:
+            open_order_rows = []
+
+    return {"positions": positions_rows, "open_orders": open_order_rows}
+
+
+def _worker_risk_manager_positions_snapshot() -> list[dict[str, Any]]:
     worker = _get_momentum_worker()
     if worker is None:
         return []
@@ -106,6 +205,16 @@ def _worker_positions_snapshot() -> list[dict[str, Any]]:
     return rows
 
 
+def _worker_positions_snapshot(include_open_orders: bool = True) -> list[dict[str, Any]]:
+    exchange_snapshot = _worker_exchange_snapshot(include_open_orders=include_open_orders)
+    rows = list(exchange_snapshot.get("positions", []))
+    if include_open_orders:
+        rows.extend(exchange_snapshot.get("open_orders", []))
+    if rows:
+        return rows
+    return _worker_risk_manager_positions_snapshot()
+
+
 def _worker_risk_snapshot() -> dict[str, Any] | None:
     worker = _get_momentum_worker()
     if worker is None:
@@ -118,7 +227,10 @@ def _worker_risk_snapshot() -> dict[str, Any] | None:
     account_balance = _safe_float(getattr(risk_manager, "account_balance", DEFAULT_ACCOUNT_EQUITY), DEFAULT_ACCOUNT_EQUITY)
     total_pnl = _safe_float(getattr(risk_manager, "total_pnl", 0.0), 0.0)
     daily_pnl = _safe_float(getattr(risk_manager, "daily_pnl", 0.0), 0.0)
-    positions = _worker_positions_snapshot()
+    exchange_snapshot = _worker_exchange_snapshot(include_open_orders=True)
+    exchange_positions = list(exchange_snapshot.get("positions", []))
+    open_orders_count = len(exchange_snapshot.get("open_orders", []))
+    positions = exchange_positions if exchange_positions else _worker_risk_manager_positions_snapshot()
 
     exposure = sum(
         _safe_float(p.get("quantity"), 0.0) * _safe_float(p.get("current_price"), 0.0)
@@ -134,6 +246,7 @@ def _worker_risk_snapshot() -> dict[str, Any] | None:
         "exposure_pct": exposure_pct,
         "exposure": exposure,
         "open_positions": len(positions),
+        "open_orders": open_orders_count,
     }
 
 
@@ -291,6 +404,7 @@ async def get_risk_status_route() -> dict[str, Any]:
         "exposure_pct": 0.0,
         "exposure": 0.0,
         "open_positions": 0,
+        "open_orders": 0,
     }
 
     try:
@@ -318,6 +432,7 @@ async def get_risk_status_route() -> dict[str, Any]:
                         "exposure_pct",
                         "exposure",
                         "open_positions",
+                        "open_orders",
                     ):
                         if key in payload:
                             snapshot[key] = payload[key]
