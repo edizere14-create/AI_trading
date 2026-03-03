@@ -29,7 +29,12 @@ from app.ui.data_client import (
 from app.ui.theme import apply_theme
 
 HTTP_TIMEOUT_SEC = 3
-MAX_RISK_PER_TRADE = 0.02
+RISK_PER_TRADE_MIN = 0.01
+RISK_PER_TRADE_MAX = 0.02
+DEFAULT_RISK_PER_TRADE = 0.015
+DEFAULT_STOP_LOSS_PCT = 0.01
+MICRO_SIZE_MIN = 0.0002
+MICRO_SIZE_MAX = 0.001
 MAX_DAILY_LOSS_PCT = 0.05
 
 
@@ -38,6 +43,28 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _calc_stop_price(entry_price: float, side: str, stop_loss_pct: float) -> float:
+    if entry_price <= 0:
+        return 0.0
+    if str(side).strip().lower() == "sell":
+        return entry_price * (1.0 + stop_loss_pct)
+    return entry_price * (1.0 - stop_loss_pct)
+
+
+def _compute_auto_position_size(balance: float, entry_price: float, stop_price: float, risk_pct: float) -> float:
+    if balance <= 0 or entry_price <= 0 or risk_pct <= 0:
+        return 0.0
+    per_unit_risk = abs(entry_price - stop_price)
+    if per_unit_risk <= 0:
+        return 0.0
+
+    risk_budget = balance * risk_pct
+    raw_qty = risk_budget / per_unit_risk
+    if raw_qty < MICRO_SIZE_MIN:
+        return 0.0
+    return min(raw_qty, MICRO_SIZE_MAX)
 
 
 def _api_is_healthy(api_url: str) -> bool:
@@ -307,7 +334,20 @@ if default_preview_symbol not in futures_symbols:
 preview_symbol = st.sidebar.selectbox("Futures Contract", options=futures_symbols, index=futures_symbols.index(default_preview_symbol))
 preview_bucket_asset = st.sidebar.text_input("Bucket Asset", "BTC")
 preview_bucket_limit_pct = st.sidebar.slider("Bucket Limit %", 10.0, 100.0, 60.0, 1.0)
-preview_quantity = st.sidebar.number_input("Preview Quantity", min_value=0.1, value=1.0, step=0.1)
+risk_per_trade_pct = (
+    st.sidebar.slider(
+        "Risk Per Trade %",
+        RISK_PER_TRADE_MIN * 100.0,
+        RISK_PER_TRADE_MAX * 100.0,
+        DEFAULT_RISK_PER_TRADE * 100.0,
+        0.1,
+    )
+    / 100.0
+)
+stop_loss_pct = (
+    st.sidebar.slider("Stop Loss %", 0.2, 5.0, DEFAULT_STOP_LOSS_PCT * 100.0, 0.1)
+    / 100.0
+)
 preview_collateral_assets = st.sidebar.text_input("Collateral Assets", "USDT,USDC,BTC")
 preview_collateral_total_usd = st.sidebar.number_input("Collateral Total (USD)", min_value=100.0, value=3000.0, step=100.0)
 
@@ -341,21 +381,37 @@ stream_connected = _safe_float(getattr(stream.latest, "price", 0.0), 0.0) > 0
 st.sidebar.caption("Stream: ✅ Connected" if stream_connected else "Stream: ❌ Waiting for ticks")
 
 
-def _risk_guard(quantity: float, current_price: float, balance: float) -> str | None:
+def _risk_guard(
+    quantity: float,
+    current_price: float,
+    balance: float,
+    stop_price: float,
+    risk_pct: float,
+) -> str | None:
     if balance <= 0:
         return "Insufficient balance."
     if quantity <= 0:
         return "Quantity must be greater than 0."
     if current_price <= 0:
         return "No live price available; wait for stream sync."
+    if stop_price <= 0:
+        return "Stop price unavailable."
 
-    notional = quantity * current_price
-    max_notional = balance * MAX_RISK_PER_TRADE
-    if notional > max_notional:
+    per_unit_risk = abs(current_price - stop_price)
+    if per_unit_risk <= 0:
+        return "Invalid stop-loss distance."
+
+    risk_amount = per_unit_risk * quantity
+    max_risk_amount = balance * risk_pct
+    if risk_amount > (max_risk_amount + 1e-9):
         return (
-            f"Risk exceeds limit: order notional ${notional:,.2f} > "
-            f"${max_notional:,.2f} ({MAX_RISK_PER_TRADE * 100:.1f}% cap)."
+            f"Risk exceeds limit: max loss ${risk_amount:,.2f} > "
+            f"${max_risk_amount:,.2f} ({risk_pct * 100:.1f}% cap)."
         )
+
+    auto_max_qty = _compute_auto_position_size(balance, current_price, stop_price, risk_pct)
+    if quantity > (auto_max_qty + 1e-9):
+        return f"Quantity exceeds auto-calculated max size ({quantity:.4f} > {auto_max_qty:.4f})."
 
     daily_loss = _safe_float(st.session_state.get("daily_realized_pnl", 0.0), 0.0)
     if daily_loss <= -(balance * MAX_DAILY_LOSS_PCT):
@@ -368,26 +424,61 @@ def _risk_guard(quantity: float, current_price: float, balance: float) -> str | 
 
 current_price = _safe_float(getattr(stream.latest, "price", 0.0), 0.0)
 balance = _safe_float(st.session_state.get("balance", 0.0), 0.0)
-live_order_disabled = not (LIVE_TRADING and confirm_live_trade and api_healthy and stream_connected and account_synced)
+long_stop_price = _calc_stop_price(current_price, "buy", stop_loss_pct)
+short_stop_price = _calc_stop_price(current_price, "sell", stop_loss_pct)
+auto_quantity_long = _compute_auto_position_size(balance, current_price, long_stop_price, risk_per_trade_pct)
+auto_quantity_short = _compute_auto_position_size(balance, current_price, short_stop_price, risk_per_trade_pct)
+preview_quantity = auto_quantity_long if auto_quantity_long > 0 else auto_quantity_short
+sizing_ready = auto_quantity_long > 0 and auto_quantity_short > 0
 
-if st.sidebar.button("🟢 LONG", use_container_width=True, disabled=live_order_disabled):
-    guard_error = _risk_guard(float(preview_quantity), current_price, balance)
+st.sidebar.caption(
+    f"Sizing formula: qty = (balance * {risk_per_trade_pct * 100:.1f}%) / |entry-stop|"
+)
+st.sidebar.metric("Auto Qty (LONG)", f"{auto_quantity_long:.4f}")
+st.sidebar.metric("Auto Qty (SHORT)", f"{auto_quantity_short:.4f}")
+if current_price > 0:
+    st.sidebar.caption(
+        f"Entry={current_price:,.2f} | Long SL={long_stop_price:,.2f} | Short SL={short_stop_price:,.2f}"
+    )
+if not sizing_ready:
+    st.sidebar.warning(
+        "Auto size below micro minimum (0.0002). Increase balance, widen stop, or reduce risk constraints."
+    )
+
+live_order_disabled = not (
+    LIVE_TRADING and confirm_live_trade and api_healthy and stream_connected and account_synced and sizing_ready
+)
+
+if st.sidebar.button("LONG", use_container_width=True, disabled=live_order_disabled):
+    guard_error = _risk_guard(
+        float(auto_quantity_long),
+        current_price,
+        balance,
+        long_stop_price,
+        risk_per_trade_pct,
+    )
     if guard_error:
         st.sidebar.error(guard_error)
     else:
         try:
-            order = open_trade(api_url, "buy", amount=float(preview_quantity), symbol=preview_symbol)
+            order = open_trade(api_url, "buy", amount=float(auto_quantity_long), symbol=preview_symbol)
             st.sidebar.success(f"LONG submitted: {order.get('order_id', 'accepted')}")
         except ApiContractError as exc:
             st.sidebar.error(str(exc))
 
-if st.sidebar.button("🔴 SHORT (LIVE)", use_container_width=True, disabled=live_order_disabled):
-    guard_error = _risk_guard(float(preview_quantity), current_price, balance)
+if st.sidebar.button("SHORT (LIVE)", use_container_width=True, disabled=live_order_disabled):
+    guard_error = _risk_guard(
+        float(auto_quantity_short),
+        current_price,
+        balance,
+        short_stop_price,
+        risk_per_trade_pct,
+    )
     if guard_error:
         st.sidebar.error(guard_error)
     else:
         try:
-            order = open_trade(api_url, "sell", amount=float(preview_quantity), symbol=preview_symbol)
+            order = open_trade(api_url, "sell", amount=float(auto_quantity_short), symbol=preview_symbol)
             st.sidebar.success(f"SHORT submitted: {order.get('order_id', 'accepted')}")
         except ApiContractError as exc:
             st.sidebar.error(str(exc))
