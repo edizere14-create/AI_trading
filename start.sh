@@ -2,6 +2,10 @@
 
 set -e
 
+PROJECT_ROOT="${RENDER_PROJECT_ROOT:-/opt/render/project/src}"
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH}"
+
 # 1. Start FastAPI in the background on Port 8000
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 &
 
