@@ -150,6 +150,15 @@ def _worker_analytics() -> dict[str, Any]:
     }
 
 
+def _build_data_service(exchange_id: str):
+    from app.services.data_service import DataService
+
+    try:
+        return DataService(exchange_id=exchange_id)
+    except TypeError:
+        return DataService()
+
+
 def _build_momentum_worker(symbol: str):
     from app.services.data_service import DataService
     from engine.core.execution_engine import ExecutionEngine
@@ -300,10 +309,16 @@ async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, 
         return _worker_analytics()
 
     try:
-        from app.services.data_service import DataService
-
-        data_service = DataService(exchange_id=exchange_id)
-        candles = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=120, exchange_id=exchange_id)
+        data_service = _build_data_service(exchange_id)
+        try:
+            candles = await data_service.get_ohlcv(
+                symbol=symbol,
+                timeframe="1h",
+                limit=120,
+                exchange_id=exchange_id,
+            )
+        except TypeError:
+            candles = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=120)
         if candles is None or candles.empty:
             return _fallback_analytics("No market data returned.")
 
@@ -357,12 +372,7 @@ async def debug_data(symbol: str = Query("PF_XBTUSD")) -> dict[str, Any]:
     exchange_id = os.getenv("MARKET_DATA_EXCHANGE_ID", "krakenfutures")
 
     try:
-        from app.services.data_service import DataService
-
-        try:
-            data_service = DataService(exchange_id=exchange_id)
-        except TypeError:
-            data_service = DataService()
+        data_service = _build_data_service(exchange_id)
 
         if hasattr(data_service, "get_ohlcv"):
             try:
