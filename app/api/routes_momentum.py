@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import logging
 import traceback
@@ -159,6 +160,56 @@ def _build_data_service(exchange_id: str):
         return DataService()
 
 
+def _coerce_candles_df(payload: Any) -> pd.DataFrame:
+    if isinstance(payload, pd.DataFrame):
+        return payload
+    if isinstance(payload, dict):
+        candidate = payload.get("candles", payload.get("result", payload.get("data")))
+        if isinstance(candidate, list):
+            payload = candidate
+    if isinstance(payload, list):
+        df = pd.DataFrame(payload)
+        if not df.empty:
+            return df
+    return pd.DataFrame()
+
+
+async def _load_candles_compatible(
+    data_service: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    exchange_id: str,
+) -> pd.DataFrame:
+    get_ohlcv = getattr(data_service, "get_ohlcv", None)
+    if callable(get_ohlcv):
+        try:
+            result = get_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit, exchange_id=exchange_id)
+        except TypeError:
+            result = get_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+        if inspect.isawaitable(result):
+            result = await result
+        return _coerce_candles_df(result)
+
+    fetch_ohlcv = getattr(data_service, "fetch_ohlcv", None)
+    if callable(fetch_ohlcv):
+        try:
+            result = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit, exchange_id=exchange_id)
+        except TypeError:
+            result = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+        if inspect.isawaitable(result):
+            result = await result
+        return _coerce_candles_df(result)
+
+    sync_fetch = getattr(data_service, "_fetch_kraken_ohlcv_sync", None)
+    if callable(sync_fetch):
+        result = await asyncio.to_thread(sync_fetch, symbol, timeframe, limit)
+        return _coerce_candles_df(result)
+
+    raise AttributeError("DataService missing get_ohlcv/fetch_ohlcv compatibility methods")
+
+
 def _build_momentum_worker(symbol: str):
     from app.services.data_service import DataService
     from engine.core.execution_engine import ExecutionEngine
@@ -310,15 +361,13 @@ async def get_momentum_analytics(symbol: str = Query("PI_XBTUSD")) -> dict[str, 
 
     try:
         data_service = _build_data_service(exchange_id)
-        try:
-            candles = await data_service.get_ohlcv(
-                symbol=symbol,
-                timeframe="1h",
-                limit=120,
-                exchange_id=exchange_id,
-            )
-        except TypeError:
-            candles = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=120)
+        candles = await _load_candles_compatible(
+            data_service,
+            symbol=symbol,
+            timeframe="1h",
+            limit=120,
+            exchange_id=exchange_id,
+        )
         if candles is None or candles.empty:
             return _fallback_analytics("No market data returned.")
 
@@ -373,20 +422,13 @@ async def debug_data(symbol: str = Query("PF_XBTUSD")) -> dict[str, Any]:
 
     try:
         data_service = _build_data_service(exchange_id)
-
-        if hasattr(data_service, "get_ohlcv"):
-            try:
-                ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5, exchange_id=exchange_id)
-            except TypeError:
-                ohlcv = await data_service.get_ohlcv(symbol=symbol, timeframe="1h", limit=5)
-        else:
-            return {
-                "status": "degraded",
-                "symbol": symbol,
-                "rows": 0,
-                "latest_close": None,
-                "warning": "DataService missing get_ohlcv",
-            }
+        ohlcv = await _load_candles_compatible(
+            data_service,
+            symbol=symbol,
+            timeframe="1h",
+            limit=5,
+            exchange_id=exchange_id,
+        )
         latest_close: float | None = None
         if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
             close_series = pd.to_numeric(ohlcv["close"], errors="coerce").dropna()
