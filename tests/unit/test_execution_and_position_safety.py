@@ -1,4 +1,5 @@
 import pytest
+import pandas as pd
 
 from engine.core.execution_engine import ExecutionEngine
 from engine.workers.momentum_worker import MomentumWorker
@@ -228,3 +229,76 @@ def test_lower_confidence_keeps_maker_limit_preference(monkeypatch: pytest.Monke
     assert updated["order_type"] == "limit"
     assert updated["order_kind"] == "maker"
     assert updated["price"] == pytest.approx(73000.0 * (1.0 + 0.0008), rel=1e-6)
+
+
+def _build_trend_candles(rows: int = 60, base: float = 70000.0, step: float = 25.0) -> pd.DataFrame:
+    close = [base + (i * step) for i in range(rows)]
+    open_ = [c - 15.0 for c in close]
+    high = [c + 10.0 for c in close]
+    low = [c - 30.0 for c in close]
+    volume = [1000.0 + (i % 5) for i in range(rows)]
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+    )
+
+
+def test_entry_gate_blocks_low_confidence_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXECUTION_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONF_GATE_PCT", "55")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    candles = _build_trend_candles()
+    worker._last_context_metrics = {
+        "confidence": 20.0,
+        "pattern_long": 0.5,
+        "pattern_short": 0.1,
+    }
+    worker.signal_history.append({"side": "buy"})
+    worker.signal_history.append({"side": "buy"})
+    worker.signal_history.append({"side": "sell"})
+
+    allowed, reason, snapshot = worker._entry_gate_allows_execution(candles, "buy")
+
+    assert allowed is False
+    assert reason == "entry_gate_failed:confidence"
+    assert snapshot["confidence_gate"] is False
+
+
+def test_entry_gate_allows_high_quality_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXECUTION_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONF_GATE_PCT", "55")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONVICTION_GATE", "0.35")
+    monkeypatch.setenv("MOMENTUM_ENTRY_AGREEMENT_GATE", "0.30")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    candles = _build_trend_candles()
+    worker._last_context_metrics = {
+        "confidence": 95.0,
+        "pattern_long": 0.55,
+        "pattern_short": 0.05,
+    }
+    worker.signal_history.append({"side": "buy"})
+    worker.signal_history.append({"side": "buy"})
+    worker.signal_history.append({"side": "buy"})
+    worker.signal_history.append({"side": "sell"})
+
+    allowed, reason, snapshot = worker._entry_gate_allows_execution(candles, "buy")
+
+    assert allowed is True
+    assert reason == "entry_gate_pass"
+    assert snapshot["confidence_gate"] is True
+    assert snapshot["direction_gate"] is True

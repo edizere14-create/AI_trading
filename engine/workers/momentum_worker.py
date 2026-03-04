@@ -119,6 +119,22 @@ class MomentumWorker:
         except (TypeError, ValueError):
             self.live_taker_confidence_threshold = 90.0
         self.live_taker_confidence_threshold = max(0.0, min(self.live_taker_confidence_threshold, 100.0))
+        self.enforce_execution_gates = self._env_bool("MOMENTUM_ENFORCE_EXECUTION_GATES", True)
+        try:
+            self.entry_confidence_gate_pct = float(os.environ.get("MOMENTUM_ENTRY_CONF_GATE_PCT", "55.0") or "55.0")
+        except (TypeError, ValueError):
+            self.entry_confidence_gate_pct = 55.0
+        self.entry_confidence_gate_pct = max(0.0, min(self.entry_confidence_gate_pct, 100.0))
+        try:
+            self.entry_conviction_gate = float(os.environ.get("MOMENTUM_ENTRY_CONVICTION_GATE", "0.35") or "0.35")
+        except (TypeError, ValueError):
+            self.entry_conviction_gate = 0.35
+        self.entry_conviction_gate = max(0.0, min(self.entry_conviction_gate, 1.0))
+        try:
+            self.entry_agreement_gate = float(os.environ.get("MOMENTUM_ENTRY_AGREEMENT_GATE", "0.30") or "0.30")
+        except (TypeError, ValueError):
+            self.entry_agreement_gate = 0.30
+        self.entry_agreement_gate = max(0.0, min(self.entry_agreement_gate, 1.0))
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
         try:
@@ -206,6 +222,7 @@ class MomentumWorker:
         self.exchange_position_cache: dict[str, dict[str, Any]] = {}
         self.last_open_orders_fetch_ok = False
         self.last_positions_fetch_ok = False
+        self.last_entry_gate_snapshot: dict[str, Any] = {}
 
         self.live_train_engine: BacktestEngine | None = None
         if self.live_auto_train_enabled:
@@ -477,6 +494,126 @@ class MomentumWorker:
             return 0.0
         corr = data.iloc[:, 0].corr(data.iloc[:, 1])
         return float(corr) if pd.notna(corr) else 0.0
+
+    @staticmethod
+    def _clip_score(value: float, low: float = -1.0, high: float = 1.0) -> float:
+        return max(low, min(high, float(value)))
+
+    def _signal_agreement_raw(self, lookback: int = 20) -> float:
+        recent = list(self.signal_history)[-max(1, int(lookback)) :]
+        buys = 0
+        sells = 0
+        for row in recent:
+            if not isinstance(row, dict):
+                continue
+            side = str(row.get("side", row.get("action", "")) or "").strip().lower()
+            if side == "buy":
+                buys += 1
+            elif side == "sell":
+                sells += 1
+        total = buys + sells
+        if total <= 0:
+            return 0.0
+        return (buys - sells) / float(total)
+
+    def _entry_gate_allows_execution(self, candles: pd.DataFrame, side: str) -> tuple[bool, str, dict[str, Any]]:
+        close = pd.to_numeric(candles.get("close"), errors="coerce").dropna()
+        if close.empty:
+            snapshot = {"side": side, "reason": "no_candles"}
+            return False, "entry_gate_failed:no_candles", snapshot
+
+        current_price = float(close.iloc[-1])
+        sma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else current_price
+        sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else current_price
+
+        trend_raw = ((sma20 / sma50) - 1.0) * 100.0 if sma50 else 0.0
+        trend_score = self._clip_score(trend_raw / 0.40)
+        ret_10 = float((close.iloc[-1] / close.iloc[-11] - 1.0) * 100.0) if len(close) >= 11 else 0.0
+        momentum_score = self._clip_score(ret_10 / 0.60)
+
+        returns = close.pct_change().dropna()
+        vol_ann = float(returns.tail(96).std() * (24 * 365) ** 0.5) if len(returns) >= 20 else 0.0
+        vol_score = self._clip_score((0.80 - vol_ann) / 0.60)
+
+        context = self._last_context_metrics or self._compute_context_metrics(candles)
+        confidence_pct = float(self._safe_float(context.get("confidence", 0.0), 0.0))
+        pattern_score = float(
+            self._safe_float(
+                context.get("pattern_long", 0.0) if side == "buy" else context.get("pattern_short", 0.0),
+                0.0,
+            )
+        )
+
+        agreement_raw = float(self._signal_agreement_raw())
+        agreement_score = abs(agreement_raw)
+
+        composite = (
+            0.25 * trend_score
+            + 0.20 * momentum_score
+            + 0.15 * vol_score
+            + 0.10 * pattern_score
+            + 0.20 * self._clip_score((confidence_pct - 50.0) / 25.0)
+            + 0.10 * self._clip_score(agreement_raw)
+        )
+
+        confidence_gate = confidence_pct >= self.entry_confidence_gate_pct
+        conviction_gate = abs(composite) >= self.entry_conviction_gate
+        trend_gate = trend_score >= 0.30
+        vol_gate = vol_score >= 0.0
+        pattern_gate = pattern_score >= 0.25
+        agreement_gate = agreement_score >= self.entry_agreement_gate
+
+        if side == "buy":
+            direction_gate = composite >= self.entry_conviction_gate
+        else:
+            direction_gate = composite <= -self.entry_conviction_gate
+
+        allowed = (
+            confidence_gate
+            and conviction_gate
+            and trend_gate
+            and vol_gate
+            and pattern_gate
+            and agreement_gate
+            and direction_gate
+        )
+
+        snapshot: dict[str, Any] = {
+            "side": side,
+            "confidence_pct": confidence_pct,
+            "composite": float(composite),
+            "trend_score": float(trend_score),
+            "vol_score": float(vol_score),
+            "pattern_score": float(pattern_score),
+            "agreement_raw": float(agreement_raw),
+            "agreement_score": float(agreement_score),
+            "confidence_gate": confidence_gate,
+            "conviction_gate": conviction_gate,
+            "trend_gate": trend_gate,
+            "vol_gate": vol_gate,
+            "pattern_gate": pattern_gate,
+            "agreement_gate": agreement_gate,
+            "direction_gate": direction_gate,
+        }
+
+        if allowed:
+            return True, "entry_gate_pass", snapshot
+
+        if not confidence_gate:
+            return False, "entry_gate_failed:confidence", snapshot
+        if not conviction_gate:
+            return False, "entry_gate_failed:conviction", snapshot
+        if not trend_gate:
+            return False, "entry_gate_failed:trend", snapshot
+        if not vol_gate:
+            return False, "entry_gate_failed:volatility", snapshot
+        if not pattern_gate:
+            return False, "entry_gate_failed:pattern", snapshot
+        if not agreement_gate:
+            return False, "entry_gate_failed:agreement", snapshot
+        if not direction_gate:
+            return False, "entry_gate_failed:direction", snapshot
+        return False, "entry_gate_failed:unknown", snapshot
 
     def _compute_context_metrics(self, candles: pd.DataFrame) -> dict[str, Any]:
         if candles is None or candles.empty or "close" not in candles.columns:
@@ -1515,9 +1652,23 @@ class MomentumWorker:
             if "quantity" not in signal or float(signal.get("quantity", 0)) <= 0:
                 signal["quantity"] = 0.001
 
+            side = str(signal.get("side", "")).lower()
+            if self.enforce_execution_gates and side in {"buy", "sell"}:
+                gates_ok, gate_reason, gate_snapshot = self._entry_gate_allows_execution(candles, side)
+                self.last_entry_gate_snapshot = gate_snapshot
+                signal["gate_snapshot"] = gate_snapshot
+                if not gates_ok:
+                    logger.info(
+                        "Skipping signal: entry gate failed (%s) | side=%s snapshot=%s",
+                        gate_reason,
+                        side,
+                        gate_snapshot,
+                    )
+                    self.last_decision_reason = gate_reason
+                    return
+
             signal = self._apply_live_order_preferences(signal)
 
-            side = str(signal.get("side", "")).lower()
             symbol = str(signal.get("symbol", self.symbol))
             local_position_symbol = self._find_local_position_symbol(symbol)
 
@@ -1838,6 +1989,7 @@ class MomentumWorker:
             "execution_count": self.execution_count,
             "interval": self.interval,
             "last_decision_reason": self.last_decision_reason,
+            "last_entry_gate_snapshot": self.last_entry_gate_snapshot,
         }
         base_status["risk"] = self.risk_manager.get_status()
         return base_status
