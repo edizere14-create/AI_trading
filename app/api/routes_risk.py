@@ -42,6 +42,36 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _extract_contract_size(row: dict[str, Any]) -> float:
+    info = row.get("info")
+    if isinstance(info, dict):
+        size = _safe_float(
+            info.get("contractSize", info.get("contract_size", info.get("contractValue"))),
+            0.0,
+        )
+        if size > 0:
+            return size
+    size = _safe_float(row.get("contractSize", row.get("contract_size")), 0.0)
+    return size if size > 0 else 1.0
+
+
+def _contracts_to_base_quantity(symbol: str, contracts: float, price: float, contract_size: float) -> float:
+    qty_contracts = abs(float(contracts))
+    if qty_contracts <= 0:
+        return 0.0
+
+    size = contract_size if contract_size > 0 else 1.0
+    normalized_symbol = str(symbol or "").upper()
+    is_inverse_usd_contract = any(
+        token in normalized_symbol
+        for token in ("/USD:BTC", "/USD:XBT", "/USD:ETH", "/USD:SOL")
+    )
+
+    if is_inverse_usd_contract and price > 0:
+        return (qty_contracts * size) / price
+    return qty_contracts * size
+
+
 def _get_momentum_worker() -> Any | None:
     try:
         from app.api import routes_momentum
@@ -74,6 +104,7 @@ def _worker_exchange_snapshot(include_open_orders: bool = True) -> dict[str, lis
             if contracts == 0:
                 continue
 
+            symbol = str(pos.get("id") or pos.get("symbol") or "")
             side_raw = str(pos.get("side") or "").lower()
             side = "buy" if side_raw in {"long", "buy"} or contracts > 0 else "sell"
             entry_price = _safe_float(pos.get("entryPrice"), 0.0)
@@ -83,24 +114,34 @@ def _worker_exchange_snapshot(include_open_orders: bool = True) -> dict[str, lis
             if entry_price <= 0:
                 entry_price = current_price
 
-            symbol = str(pos.get("id") or pos.get("symbol") or "")
+            contract_size = _extract_contract_size(pos)
+            quantity = _contracts_to_base_quantity(symbol, contracts, current_price, contract_size)
+            if quantity <= 0:
+                quantity = abs(contracts)
+
+            notional = (
+                quantity * current_price
+                if current_price > 0
+                else abs(contracts) * contract_size
+            )
             unrealized = _safe_float(pos.get("unrealizedPnl"), 0.0)
             if not unrealized and current_price > 0 and entry_price > 0:
-                qty = abs(contracts)
                 unrealized = (
-                    (current_price - entry_price) * qty
+                    (current_price - entry_price) * quantity
                     if side == "buy"
-                    else (entry_price - current_price) * qty
+                    else (entry_price - current_price) * quantity
                 )
 
             positions_rows.append(
                 {
                     "symbol": symbol,
                     "side": side,
-                    "quantity": abs(contracts),
+                    "quantity": quantity,
+                    "contracts": abs(contracts),
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "unrealized_pnl": unrealized,
+                    "notional": notional,
                     "leverage": _safe_float(pos.get("leverage"), 0.0),
                     "source": "exchange",
                     "status": "open",
@@ -130,14 +171,21 @@ def _worker_exchange_snapshot(include_open_orders: bool = True) -> dict[str, lis
                 if isinstance(info, dict):
                     symbol = str(info.get("symbol") or symbol)
 
+                contract_size = _extract_contract_size(order if isinstance(order, dict) else {})
+                quantity = _contracts_to_base_quantity(symbol, qty, price, contract_size)
+                if quantity <= 0:
+                    quantity = abs(qty)
+
                 open_order_rows.append(
                     {
                         "symbol": symbol,
                         "side": side,
-                        "quantity": abs(qty),
+                        "quantity": quantity,
+                        "contracts": abs(qty),
                         "entry_price": price,
                         "current_price": price,
                         "unrealized_pnl": 0.0,
+                        "notional": quantity * price if price > 0 else abs(qty) * contract_size,
                         "leverage": 0.0,
                         "source": "open_order",
                         "status": "open_order",
@@ -205,7 +253,7 @@ def _worker_risk_manager_positions_snapshot() -> list[dict[str, Any]]:
     return rows
 
 
-def _worker_positions_snapshot(include_open_orders: bool = True) -> list[dict[str, Any]]:
+def _worker_positions_snapshot(include_open_orders: bool = False) -> list[dict[str, Any]]:
     exchange_snapshot = _worker_exchange_snapshot(include_open_orders=include_open_orders)
     rows = list(exchange_snapshot.get("positions", []))
     if include_open_orders:
@@ -213,6 +261,17 @@ def _worker_positions_snapshot(include_open_orders: bool = True) -> list[dict[st
     if rows:
         return rows
     return _worker_risk_manager_positions_snapshot()
+
+
+def _filter_open_order_rows(rows: list[dict[str, Any]], include_open_orders: bool) -> list[dict[str, Any]]:
+    if include_open_orders:
+        return rows
+    return [
+        row
+        for row in rows
+        if str(row.get("status", "")).lower() != "open_order"
+        and str(row.get("source", "")).lower() != "open_order"
+    ]
 
 
 def _worker_risk_snapshot() -> dict[str, Any] | None:
@@ -233,7 +292,10 @@ def _worker_risk_snapshot() -> dict[str, Any] | None:
     positions = exchange_positions if exchange_positions else _worker_risk_manager_positions_snapshot()
 
     exposure = sum(
-        _safe_float(p.get("quantity"), 0.0) * _safe_float(p.get("current_price"), 0.0)
+        _safe_float(
+            p.get("notional"),
+            _safe_float(p.get("quantity"), 0.0) * _safe_float(p.get("current_price"), 0.0),
+        )
         for p in positions
     )
     exposure_pct = (exposure / account_balance * 100.0) if account_balance > 0 else 0.0
@@ -461,18 +523,19 @@ async def get_risk_positions_route() -> dict[str, list[dict[str, Any]]]:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{RISK_MICROSERVICE_URL}/positions")
         if response.status_code != 200:
-            return {"positions": _worker_positions_snapshot()}
+            return {"positions": _worker_positions_snapshot(include_open_orders=False)}
 
         payload = response.json() if response.content else []
         if isinstance(payload, dict):
             rows = payload.get("positions", [])
-            return {"positions": rows if isinstance(rows, list) else []}
+            valid_rows = rows if isinstance(rows, list) else []
+            return {"positions": _filter_open_order_rows(valid_rows, include_open_orders=False)}
         if isinstance(payload, list):
-            return {"positions": payload}
+            return {"positions": _filter_open_order_rows(payload, include_open_orders=False)}
     except httpx.RequestError:
         pass
 
-    return {"positions": _worker_positions_snapshot()}
+    return {"positions": _worker_positions_snapshot(include_open_orders=False)}
 
 
 @router.post(

@@ -308,6 +308,7 @@ elif _is_local_url(ws_url) and is_remote_backend:
     st.sidebar.warning("Local WebSocket URL detected with remote backend. Using remote WebSocket URL.")
 
 refresh_sec = st.sidebar.slider("Refresh (sec)", 1, 30, 2)
+auto_refresh_enabled = st.sidebar.checkbox("Auto refresh", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Webhook URLs")
@@ -533,7 +534,7 @@ if st.sidebar.button("Close All Positions", type="primary", use_container_width=
         except ApiContractError as exc:
             st.sidebar.error(str(exc))
 
-if mode == "Backend API" or page == "Portfolio Overview":
+if auto_refresh_enabled and (mode == "Backend API" or page == "Portfolio Overview"):
     st_autorefresh(interval=refresh_sec * 1000, key="ui_refresh")
 
 st.sidebar.markdown("---")

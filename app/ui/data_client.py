@@ -17,6 +17,18 @@ class ApiContractError(RuntimeError):
     pass
 
 
+def _format_kraken_exchange_error(action: str, exc: Exception) -> ApiContractError:
+    raw = str(exc).strip() or exc.__class__.__name__
+    normalized = raw.lower()
+    if any(token in normalized for token in ("incorrect padding", "invalid base64", "non-base64")):
+        return ApiContractError(
+            "Invalid Kraken API secret format in All-in-One mode (base64/padding error). "
+            "Re-copy KRAKEN_API_SECRET exactly as issued, without quotes or extra spaces/newlines, "
+            "or switch to Backend API mode."
+        )
+    return ApiContractError(f"Failed to {action}: {raw}")
+
+
 def _paper_positions_df() -> pd.DataFrame:
     try:
         import streamlit as st
@@ -58,14 +70,17 @@ def add_paper_trade(side: str, symbol: str, quantity: float, entry_price: float)
 
 
 def _all_in_one_enabled(api_url: str) -> bool:
-    mode = os.getenv("STREAMLIT_APP_MODE", "all-in-one").strip().lower()
-    return mode in {"all-in-one", "direct"} or api_url.strip().lower() in {"all-in-one", "direct"}
+    return api_url.strip().lower() in {"all-in-one", "direct"}
 
 
 def _database_url() -> str:
     url = os.getenv("DATABASE_URL", "").strip()
     if not url:
         raise ApiContractError("DATABASE_URL is not set.")
+    if url.startswith("postgresql+asyncpg://"):
+        url = "postgresql://" + url[len("postgresql+asyncpg://") :]
+    elif url.startswith("postgres+asyncpg://"):
+        url = "postgres://" + url[len("postgres+asyncpg://") :]
     return url
 
 
@@ -208,6 +223,37 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _extract_contract_size(row: dict[str, Any]) -> float:
+    info = row.get("info")
+    if isinstance(info, dict):
+        size = _safe_float(
+            info.get("contractSize", info.get("contract_size", info.get("contractValue")))
+        )
+        if isinstance(size, float) and size > 0:
+            return size
+    size = _safe_float(row.get("contractSize", row.get("contract_size")))
+    if isinstance(size, float) and size > 0:
+        return size
+    return 1.0
+
+
+def _contracts_to_display_quantity(symbol: str, contracts: float, price: float, contract_size: float) -> float:
+    qty_contracts = abs(float(contracts))
+    if qty_contracts <= 0:
+        return 0.0
+
+    size = contract_size if contract_size > 0 else 1.0
+    normalized_symbol = str(symbol or "").upper()
+    is_inverse_usd_contract = any(
+        token in normalized_symbol
+        for token in ("/USD:BTC", "/USD:XBT", "/USD:ETH", "/USD:SOL")
+    )
+
+    if is_inverse_usd_contract and price > 0:
+        return (qty_contracts * size) / price
+    return qty_contracts * size
+
+
 def get_metrics(api_url: str) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
@@ -232,7 +278,9 @@ def get_metrics(api_url: str) -> dict[str, Any]:
         ai = get_ai_insight(api_url)
         trades = get_active_trades(api_url)
         exposure = 0.0
-        if not trades.empty and {"quantity", "entry_price"}.issubset(trades.columns):
+        if not trades.empty and "notional" in trades.columns:
+            exposure = float(pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0).sum())
+        elif not trades.empty and {"quantity", "entry_price"}.issubset(trades.columns):
             notionals = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
                 trades["entry_price"], errors="coerce"
             ).fillna(last)
@@ -272,7 +320,10 @@ def get_ai_insight(api_url: str) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
         symbol = _kraken_symbol()
         exchange = _build_exchange()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=120)
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=120)
+        except Exception as exc:
+            raise _format_kraken_exchange_error("fetch Kraken candles", exc) from exc
         if len(ohlcv) < 30:
             return {
                 "bias": "NEUTRAL",
@@ -334,25 +385,33 @@ def get_active_trades(api_url: str) -> pd.DataFrame:
         exchange = _build_exchange()
         try:
             positions = exchange.fetch_positions()
-        except Exception as e:
-            raise ApiContractError(f"Failed to fetch Kraken positions: {e}") from e
+        except Exception as exc:
+            raise _format_kraken_exchange_error("fetch Kraken positions", exc) from exc
 
         rows: list[dict[str, Any]] = []
         for p in positions or []:
             contracts = float(p.get("contracts") or 0.0)
             if contracts == 0:
                 continue
+            symbol = str(p.get("symbol") or p.get("id") or "")
             side = str(p.get("side") or "").lower() or ("buy" if contracts > 0 else "sell")
             entry = float(p.get("entryPrice") or p.get("markPrice") or 0.0)
             mark = float(p.get("markPrice") or entry)
+            contract_size = _extract_contract_size(p)
+            quantity = _contracts_to_display_quantity(symbol, contracts, mark or entry, contract_size)
+            if quantity <= 0:
+                quantity = abs(contracts)
+            notional = (quantity * mark) if mark > 0 else abs(contracts) * contract_size
             rows.append(
                 {
-                    "symbol": str(p.get("symbol") or ""),
+                    "symbol": symbol,
                     "side": "buy" if side in {"long", "buy"} else "sell",
-                    "quantity": abs(contracts),
+                    "quantity": quantity,
+                    "contracts": abs(contracts),
                     "entry_price": entry,
                     "current_price": mark,
                     "unrealized_pnl": float(p.get("unrealizedPnl") or 0.0),
+                    "notional": notional,
                     "leverage": float(p.get("leverage") or 0.0),
                     "source": "exchange",
                 }
@@ -384,7 +443,10 @@ def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
         symbol = _kraken_symbol()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=max(50, int(limit)))
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=max(50, int(limit)))
+        except Exception as exc:
+            raise _format_kraken_exchange_error("fetch Kraken candles", exc) from exc
         rows = [
             {
                 "timestamp": pd.to_datetime(int(r[0]), unit="ms", utc=True),
@@ -432,9 +494,12 @@ def get_portfolio(api_url: str) -> pd.DataFrame:
         if trades.empty:
             return trades
         trades = trades.copy()
-        trades["notional"] = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
-            trades["current_price"], errors="coerce"
-        ).fillna(0.0)
+        if "notional" in trades.columns:
+            trades["notional"] = pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0)
+        else:
+            trades["notional"] = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
+                trades["current_price"], errors="coerce"
+            ).fillna(0.0)
         total = float(trades["notional"].sum())
         trades["weight_pct"] = (trades["notional"] / total * 100.0) if total > 0 else 0.0
         return trades
@@ -450,16 +515,24 @@ def get_portfolio(api_url: str) -> pd.DataFrame:
 
 def get_backtest(api_url: str, lookback_days: int = 90) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
-        rows = _run_async(
-            _db_fetch(
-                """
-                SELECT created_at, initial_capital, final_value, total_return, sharpe_ratio, max_drawdown, total_trades, win_rate
-                FROM backtest_results
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
+        try:
+            rows = _run_async(
+                _db_fetch(
+                    """
+                    SELECT created_at, initial_capital, final_value, total_return, sharpe_ratio, max_drawdown, total_trades, win_rate
+                    FROM backtest_results
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
             )
-        )
+        except Exception as exc:
+            return {
+                "stats": {"net_pnl": 0.0, "win_rate": 0.0, "sharpe": 0.0, "max_drawdown": 0.0, "trades": 0},
+                "equity_curve": [],
+                "monthly_performance": [],
+                "analytics": {"warning": f"Backtest DB unavailable: {exc}"},
+            }
         if not rows:
             return {
                 "stats": {"net_pnl": 0.0, "win_rate": 0.0, "sharpe": 0.0, "max_drawdown": 0.0, "trades": 0},
@@ -552,8 +625,8 @@ def get_account_balance(api_url: str) -> float:
         exchange = _build_exchange()
         try:
             balance = exchange.fetch_balance()
-        except Exception as e:
-            raise ApiContractError(f"Failed to fetch account balance: {e}") from e
+        except Exception as exc:
+            raise _format_kraken_exchange_error("fetch account balance", exc) from exc
 
         total = balance.get("total", {}) or {}
         equity = 0.0
