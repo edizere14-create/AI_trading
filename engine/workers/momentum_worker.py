@@ -158,6 +158,23 @@ class MomentumWorker:
         self.exit_correlation_spike_abs = float(
             os.environ.get("MOMENTUM_EXIT_CORRELATION_SPIKE_ABS", "0.85") or "0.85"
         )
+        self.enforce_exit_execution_gates = self._env_bool("MOMENTUM_ENFORCE_EXIT_GATES", True)
+        self.exit_confidence_floor_pct = float(
+            os.environ.get("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "48.0") or "48.0"
+        )
+        self.exit_confidence_floor_pct = max(0.0, min(self.exit_confidence_floor_pct, 100.0))
+        self.exit_composite_floor = float(os.environ.get("MOMENTUM_EXIT_COMPOSITE_FLOOR", "0.15") or "0.15")
+        self.exit_composite_floor = max(0.0, min(self.exit_composite_floor, 1.0))
+        self.exit_trend_floor = float(os.environ.get("MOMENTUM_EXIT_TREND_FLOOR", "0.05") or "0.05")
+        self.exit_trend_floor = max(0.0, min(self.exit_trend_floor, 1.0))
+        self.exit_pattern_floor = float(os.environ.get("MOMENTUM_EXIT_PATTERN_FLOOR", "0.10") or "0.10")
+        self.exit_pattern_floor = max(0.0, min(self.exit_pattern_floor, 1.0))
+        self.exit_imbalance_floor = float(os.environ.get("MOMENTUM_EXIT_IMBALANCE_FLOOR", "0.05") or "0.05")
+        self.exit_imbalance_floor = max(0.0, min(self.exit_imbalance_floor, 1.0))
+        self.exit_opposite_imbalance_spike = float(
+            os.environ.get("MOMENTUM_EXIT_OPPOSITE_IMBALANCE_SPIKE", "0.25") or "0.25"
+        )
+        self.exit_opposite_imbalance_spike = max(0.0, min(self.exit_opposite_imbalance_spike, 1.0))
 
         self.live_auto_train_enabled = self._env_bool("MOMENTUM_AUTO_TRAIN_ENABLED", True)
         self.auto_train_every_n_iters = int(os.environ.get("MOMENTUM_AUTO_TRAIN_EVERY", "30") or "30")
@@ -223,6 +240,7 @@ class MomentumWorker:
         self.last_open_orders_fetch_ok = False
         self.last_positions_fetch_ok = False
         self.last_entry_gate_snapshot: dict[str, Any] = {}
+        self.last_exit_gate_snapshot: dict[str, Any] = {}
 
         self.live_train_engine: BacktestEngine | None = None
         if self.live_auto_train_enabled:
@@ -861,7 +879,140 @@ class MomentumWorker:
             self.position_guards[symbol] = guard
         return guard
 
+    def _evaluate_exit_logic(
+        self,
+        *,
+        position_side: str,
+        context: dict[str, Any],
+        current_price: float,
+        entry_price: float,
+        bars_held: int,
+        guard: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        is_long = position_side == "buy"
+        suffix = "" if is_long else "_short"
+        composite_key = "composite_long" if is_long else "composite_short"
+        pattern_key = "pattern_long" if is_long else "pattern_short"
+        imbalance_key = "imbalance_long" if is_long else "imbalance_short"
+        opposite_imbalance_key = "imbalance_short" if is_long else "imbalance_long"
+        reversal_key = "reversal_long" if is_long else "reversal_short"
+
+        unrealized_pct = (
+            (current_price - entry_price) / entry_price
+            if is_long
+            else (entry_price - current_price) / entry_price
+        )
+        loss_pct = max(0.0, -unrealized_pct)
+        confidence = float(context.get("confidence", 0.0))
+        composite = float(context.get(composite_key, 0.0))
+        trend = float(context.get("trend_score", 0.0))
+        pattern = float(context.get(pattern_key, 0.0))
+        imbalance = float(context.get(imbalance_key, 0.0))
+        opposite_imbalance = float(context.get(opposite_imbalance_key, 0.0))
+
+        snapshot: dict[str, Any] = {
+            "position_side": position_side,
+            "current_price": current_price,
+            "entry_price": entry_price,
+            "unrealized_pct": float(unrealized_pct),
+            "loss_pct": float(loss_pct),
+            "confidence": confidence,
+            "composite": composite,
+            "trend": trend,
+            "pattern": pattern,
+            "imbalance": imbalance,
+            "opposite_imbalance": opposite_imbalance,
+            "bars_held": int(bars_held),
+            "stop_price_before": float(guard.get("stop_price", entry_price)),
+            "thresholds": {
+                "loss_cut": float(self.exit_max_loss_pct),
+                "confidence_floor": float(self.exit_confidence_floor_pct),
+                "composite_floor": float(self.exit_composite_floor),
+                "trend_floor": float(self.exit_trend_floor),
+                "pattern_floor": float(self.exit_pattern_floor),
+                "imbalance_floor": float(self.exit_imbalance_floor),
+                "opposite_imbalance_spike": float(self.exit_opposite_imbalance_spike),
+            },
+            "gates": {
+                "loss_cut": loss_pct >= self.exit_max_loss_pct,
+                "confidence_break": confidence < self.exit_confidence_floor_pct,
+                "composite_break": composite <= self.exit_composite_floor,
+                "trend_break": trend <= self.exit_trend_floor,
+                "pattern_break": pattern <= self.exit_pattern_floor,
+                "imbalance_break": imbalance <= self.exit_imbalance_floor,
+                "opposite_imbalance_spike": opposite_imbalance >= self.exit_opposite_imbalance_spike,
+            },
+        }
+
+        reason = ""
+        if self.enforce_exit_execution_gates:
+            if loss_pct >= self.exit_max_loss_pct:
+                reason = f"loss_cut_2pct{suffix}"
+            elif confidence < self.exit_confidence_floor_pct:
+                reason = f"confidence_below_{int(self.exit_confidence_floor_pct)}{suffix}"
+            elif composite <= self.exit_composite_floor:
+                reason = f"composite_below_{self.exit_composite_floor:.2f}{suffix}"
+            elif trend <= self.exit_trend_floor:
+                reason = f"trend_below_{self.exit_trend_floor:.2f}{suffix}"
+            elif pattern <= self.exit_pattern_floor:
+                reason = f"pattern_below_{self.exit_pattern_floor:.2f}{suffix}"
+            elif imbalance <= self.exit_imbalance_floor:
+                reason = f"imbalance_below_{self.exit_imbalance_floor:.2f}{suffix}"
+            elif opposite_imbalance >= self.exit_opposite_imbalance_spike:
+                reason = f"opposite_imbalance_spike{suffix}"
+
+        r_value = float(guard.get("risk_r", self.exit_max_loss_pct))
+        if unrealized_pct >= (1.0 * r_value):
+            if is_long:
+                guard["stop_price"] = max(float(guard.get("stop_price", entry_price)), entry_price)
+            else:
+                guard["stop_price"] = min(float(guard.get("stop_price", entry_price)), entry_price)
+        if unrealized_pct >= (2.0 * r_value):
+            trailing = (
+                current_price * (1.0 - (0.75 * r_value))
+                if is_long
+                else current_price * (1.0 + (0.75 * r_value))
+            )
+            if is_long:
+                guard["stop_price"] = max(float(guard.get("stop_price", entry_price)), trailing)
+            else:
+                guard["stop_price"] = min(float(guard.get("stop_price", entry_price)), trailing)
+
+        stop_price = float(guard.get("stop_price", entry_price))
+        if is_long and current_price <= stop_price:
+            reason = reason or "profit_lock_stop_hit"
+        if (not is_long) and current_price >= stop_price:
+            reason = reason or "profit_lock_stop_hit_short"
+
+        if bool(context.get(reversal_key, False)):
+            reason = reason or (f"strong_reversal_against{'_long' if is_long else '_short'}")
+
+        if bars_held >= self.exit_time_stop_bars:
+            entry_momentum = abs(float(guard.get("entry_momentum", 0.0)))
+            current_momentum = abs(float(context.get("momentum", 0.0)))
+            if current_momentum <= (entry_momentum * 1.05):
+                reason = reason or (f"time_stop_no_momentum_expansion{suffix}")
+
+        entry_atr = float(guard.get("entry_atr", 0.0))
+        current_atr = float(context.get("atr", 0.0))
+        if entry_atr > 0 and current_atr > 0 and current_atr <= (entry_atr * self.exit_volatility_contraction):
+            reason = reason or (f"volatility_contraction_exit{suffix}")
+
+        vol_ma20 = float(context.get("vol_ma20", 0.0))
+        vol_last = float(context.get("vol_last", 0.0))
+        if vol_ma20 > 0 and vol_last < (vol_ma20 * self.exit_liquidity_vacuum_factor):
+            reason = reason or (f"liquidity_vacuum_exit{suffix}")
+
+        corr = abs(float(context.get("correlation", 0.0)))
+        if corr >= self.exit_correlation_spike_abs:
+            reason = reason or (f"correlation_spike_exit{suffix}")
+
+        snapshot["stop_price_after"] = float(guard.get("stop_price", entry_price))
+        snapshot["reason"] = reason
+        return reason, snapshot
+
     def _build_exit_signal_if_needed(self, candles: pd.DataFrame) -> dict[str, Any] | None:
+        self.last_exit_gate_snapshot = {}
         if not self.risk_manager.positions:
             return None
         context = self._compute_context_metrics(candles)
@@ -885,141 +1036,29 @@ class MomentumWorker:
             guard["highest_price"] = max(float(guard.get("highest_price", entry_price)), current_price)
             guard["lowest_price"] = min(float(guard.get("lowest_price", entry_price)), current_price)
             bars_held = max(0, len(self.candle_history) - int(guard.get("entry_candle_index", len(self.candle_history))))
+            reason, snapshot = self._evaluate_exit_logic(
+                position_side=side,
+                context=context,
+                current_price=current_price,
+                entry_price=entry_price,
+                bars_held=bars_held,
+                guard=guard,
+            )
+            snapshot["symbol"] = symbol
+            self.last_exit_gate_snapshot = snapshot
 
-            if side == "buy":
-                unrealized_pct = (current_price - entry_price) / entry_price
-                loss_pct = max(0.0, -unrealized_pct)
-                confidence = float(context.get("confidence", 0.0))
-                composite = float(context.get("composite_long", 0.0))
-                trend = float(context.get("trend_score", 0.0))
-                pattern = float(context.get("pattern_long", 0.0))
-                imbalance = float(context.get("imbalance_long", 0.0))
-                opposite_imbalance = float(context.get("imbalance_short", 0.0))
-
-                if loss_pct >= self.exit_max_loss_pct:
-                    reason = "loss_cut_2pct"
-                elif confidence < 48.0:
-                    reason = "confidence_below_48"
-                elif composite <= 0.15:
-                    reason = "composite_below_0.15"
-                elif trend <= 0.05:
-                    reason = "trend_below_0.05"
-                elif pattern <= 0.10:
-                    reason = "pattern_below_0.10"
-                elif imbalance <= 0.05:
-                    reason = "imbalance_below_0.05"
-                elif opposite_imbalance >= 0.25:
-                    reason = "opposite_imbalance_spike"
-                else:
-                    reason = ""
-
-                r_value = float(guard.get("risk_r", self.exit_max_loss_pct))
-                if unrealized_pct >= (1.0 * r_value):
-                    guard["stop_price"] = max(float(guard.get("stop_price", entry_price)), entry_price)
-                if unrealized_pct >= (2.0 * r_value):
-                    trailing = current_price * (1.0 - (0.75 * r_value))
-                    guard["stop_price"] = max(float(guard.get("stop_price", entry_price)), trailing)
-
-                if current_price <= float(guard.get("stop_price", entry_price)):
-                    reason = reason or "profit_lock_stop_hit"
-                if bool(context.get("reversal_long", False)):
-                    reason = reason or "strong_reversal_against_long"
-                if bars_held >= self.exit_time_stop_bars:
-                    entry_momentum = abs(float(guard.get("entry_momentum", 0.0)))
-                    current_momentum = abs(float(context.get("momentum", 0.0)))
-                    if current_momentum <= (entry_momentum * 1.05):
-                        reason = reason or "time_stop_no_momentum_expansion"
-                entry_atr = float(guard.get("entry_atr", 0.0))
-                current_atr = float(context.get("atr", 0.0))
-                if entry_atr > 0 and current_atr > 0 and current_atr <= (entry_atr * self.exit_volatility_contraction):
-                    reason = reason or "volatility_contraction_exit"
-                vol_ma20 = float(context.get("vol_ma20", 0.0))
-                vol_last = float(context.get("vol_last", 0.0))
-                if vol_ma20 > 0 and vol_last < (vol_ma20 * self.exit_liquidity_vacuum_factor):
-                    reason = reason or "liquidity_vacuum_exit"
-                corr = abs(float(context.get("correlation", 0.0)))
-                if corr >= self.exit_correlation_spike_abs:
-                    reason = reason or "correlation_spike_exit"
-
-                if reason:
-                    return {
-                        "symbol": symbol,
-                        "side": "sell",
-                        "quantity": quantity,
-                        "order_type": "market",
-                        "order_kind": "taker",
-                        "strategy_id": "momentum_exit_v1",
-                        "regime": "risk_exit",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "exit_reason": reason,
-                    }
-            else:
-                unrealized_pct = (entry_price - current_price) / entry_price
-                loss_pct = max(0.0, -unrealized_pct)
-                confidence = float(context.get("confidence", 0.0))
-                composite = float(context.get("composite_short", 0.0))
-                trend = float(context.get("trend_score", 0.0))
-                pattern = float(context.get("pattern_short", 0.0))
-                imbalance = float(context.get("imbalance_short", 0.0))
-                opposite_imbalance = float(context.get("imbalance_long", 0.0))
-
-                if loss_pct >= self.exit_max_loss_pct:
-                    reason = "loss_cut_2pct_short"
-                elif confidence < 48.0:
-                    reason = "confidence_below_48_short"
-                elif composite <= 0.15:
-                    reason = "composite_below_0.15_short"
-                elif trend <= 0.05:
-                    reason = "trend_below_0.05_short"
-                elif pattern <= 0.10:
-                    reason = "pattern_below_0.10_short"
-                elif imbalance <= 0.05:
-                    reason = "imbalance_below_0.05_short"
-                elif opposite_imbalance >= 0.25:
-                    reason = "opposite_imbalance_spike_short"
-                else:
-                    reason = ""
-
-                r_value = float(guard.get("risk_r", self.exit_max_loss_pct))
-                if unrealized_pct >= (1.0 * r_value):
-                    guard["stop_price"] = min(float(guard.get("stop_price", entry_price)), entry_price)
-                if unrealized_pct >= (2.0 * r_value):
-                    trailing = current_price * (1.0 + (0.75 * r_value))
-                    guard["stop_price"] = min(float(guard.get("stop_price", entry_price)), trailing)
-
-                if current_price >= float(guard.get("stop_price", entry_price)):
-                    reason = reason or "profit_lock_stop_hit_short"
-                if bool(context.get("reversal_short", False)):
-                    reason = reason or "strong_reversal_against_short"
-                if bars_held >= self.exit_time_stop_bars:
-                    entry_momentum = abs(float(guard.get("entry_momentum", 0.0)))
-                    current_momentum = abs(float(context.get("momentum", 0.0)))
-                    if current_momentum <= (entry_momentum * 1.05):
-                        reason = reason or "time_stop_no_momentum_expansion_short"
-                entry_atr = float(guard.get("entry_atr", 0.0))
-                current_atr = float(context.get("atr", 0.0))
-                if entry_atr > 0 and current_atr > 0 and current_atr <= (entry_atr * self.exit_volatility_contraction):
-                    reason = reason or "volatility_contraction_exit_short"
-                vol_ma20 = float(context.get("vol_ma20", 0.0))
-                vol_last = float(context.get("vol_last", 0.0))
-                if vol_ma20 > 0 and vol_last < (vol_ma20 * self.exit_liquidity_vacuum_factor):
-                    reason = reason or "liquidity_vacuum_exit_short"
-                corr = abs(float(context.get("correlation", 0.0)))
-                if corr >= self.exit_correlation_spike_abs:
-                    reason = reason or "correlation_spike_exit_short"
-
-                if reason:
-                    return {
-                        "symbol": symbol,
-                        "side": "buy",
-                        "quantity": quantity,
-                        "order_type": "market",
-                        "order_kind": "taker",
-                        "strategy_id": "momentum_exit_v1",
-                        "regime": "risk_exit",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "exit_reason": reason,
-                    }
+            if reason:
+                return {
+                    "symbol": symbol,
+                    "side": ("sell" if side == "buy" else "buy"),
+                    "quantity": quantity,
+                    "order_type": "market",
+                    "order_kind": "taker",
+                    "strategy_id": "momentum_exit_v1",
+                    "regime": "risk_exit",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "exit_reason": reason,
+                }
 
         return None
 
@@ -1990,6 +2029,7 @@ class MomentumWorker:
             "interval": self.interval,
             "last_decision_reason": self.last_decision_reason,
             "last_entry_gate_snapshot": self.last_entry_gate_snapshot,
+            "last_exit_gate_snapshot": self.last_exit_gate_snapshot,
         }
         base_status["risk"] = self.risk_manager.get_status()
         return base_status

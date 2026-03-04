@@ -479,6 +479,8 @@ async def get_momentum_status() -> dict[str, Any]:
             safe_status["last_signal"] = _json_safe(status.get("last_signal"))
         if isinstance(status.get("last_entry_gate_snapshot"), dict):
             safe_status["last_entry_gate_snapshot"] = _json_safe(status.get("last_entry_gate_snapshot"))
+        if isinstance(status.get("last_exit_gate_snapshot"), dict):
+            safe_status["last_exit_gate_snapshot"] = _json_safe(status.get("last_exit_gate_snapshot"))
 
         safe_status["ai"] = ai
         safe_status["analytics"] = ai

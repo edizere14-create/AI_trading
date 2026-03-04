@@ -302,3 +302,72 @@ def test_entry_gate_allows_high_quality_setup(monkeypatch: pytest.MonkeyPatch) -
     assert reason == "entry_gate_pass"
     assert snapshot["confidence_gate"] is True
     assert snapshot["direction_gate"] is True
+
+
+def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "48")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    worker.risk_manager.open_position("PI_XBTUSD", "buy", 0.001, 73000.0)
+
+    context = {
+        "price": 73100.0,
+        "confidence": 30.0,
+        "composite_long": 0.40,
+        "trend_score": 0.60,
+        "pattern_long": 0.50,
+        "imbalance_long": 0.55,
+        "imbalance_short": 0.10,
+        "momentum": 1.0,
+        "atr": 45.0,
+        "vol_ma20": 1000.0,
+        "vol_last": 1000.0,
+        "correlation": 0.1,
+        "reversal_long": False,
+    }
+    worker._compute_context_metrics = lambda _: context  # type: ignore[assignment]
+
+    exit_signal = worker._build_exit_signal_if_needed(_build_trend_candles(60))
+
+    assert exit_signal is not None
+    assert exit_signal["side"] == "sell"
+    assert exit_signal["exit_reason"] == "confidence_below_48"
+    assert worker.last_exit_gate_snapshot.get("reason") == "confidence_below_48"
+
+
+def test_exit_gate_does_not_trigger_when_conditions_are_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    worker.risk_manager.open_position("PI_XBTUSD", "buy", 0.001, 73000.0)
+
+    context = {
+        "price": 73500.0,
+        "confidence": 92.0,
+        "composite_long": 0.50,
+        "trend_score": 0.60,
+        "pattern_long": 0.55,
+        "imbalance_long": 0.60,
+        "imbalance_short": 0.10,
+        "momentum": 1.8,
+        "atr": 45.0,
+        "vol_ma20": 1000.0,
+        "vol_last": 1000.0,
+        "correlation": 0.2,
+        "reversal_long": False,
+    }
+    worker._compute_context_metrics = lambda _: context  # type: ignore[assignment]
+
+    exit_signal = worker._build_exit_signal_if_needed(_build_trend_candles(60))
+
+    assert exit_signal is None
+    assert worker.last_exit_gate_snapshot.get("reason", "") == ""
