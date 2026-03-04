@@ -1571,6 +1571,10 @@ class MomentumWorker:
                 return await result
             return result
 
+        sync_fetch_ohlcv_fn = getattr(data_service, "_fetch_kraken_ohlcv_sync", None)
+        if callable(sync_fetch_ohlcv_fn):
+            return await asyncio.to_thread(sync_fetch_ohlcv_fn, symbol, timeframe, limit)
+
         logger.warning("DataService has no get_ohlcv/fetch_ohlcv; using ccxt fallback for %s", symbol)
         return await self._load_ohlcv_via_ccxt(symbol=symbol, timeframe=timeframe, limit=limit)
 
