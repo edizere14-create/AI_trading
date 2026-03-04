@@ -363,12 +363,50 @@ def get_metrics(api_url: str) -> dict[str, Any]:
     # Flexible extraction for current backend shape
     ai_payload = m.get("ai", m.get("analytics", {}))
     ai = ai_payload if isinstance(ai_payload, dict) else {}
+    equity = float(r.get("account_balance", r.get("equity", 0.0)) or 0.0)
+    reported_pnl = float(r.get("total_pnl", r.get("daily_pnl", 0.0)) or 0.0)
+    reported_exposure_pct = float(r.get("exposure_pct", r.get("exposure", 0.0)) or 0.0)
+
+    display_pnl = reported_pnl
+    display_exposure_pct = reported_exposure_pct
+    try:
+        trades = get_active_trades(api_url)
+        if not trades.empty:
+            unrealized = 0.0
+            if "unrealized_pnl" in trades.columns:
+                unrealized = float(pd.to_numeric(trades["unrealized_pnl"], errors="coerce").fillna(0.0).sum())
+            if abs(display_pnl) < 1e-9 and abs(unrealized) > 1e-9:
+                display_pnl = unrealized
+
+            if display_exposure_pct <= 0.0:
+                exposure = 0.0
+                if "notional" in trades.columns:
+                    exposure = float(pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0).sum())
+                elif {"quantity", "current_price"}.issubset(trades.columns):
+                    exposure = float(
+                        (
+                            pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0)
+                            * pd.to_numeric(trades["current_price"], errors="coerce").fillna(0.0)
+                        ).sum()
+                    )
+                elif {"quantity", "entry_price"}.issubset(trades.columns):
+                    exposure = float(
+                        (
+                            pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0)
+                            * pd.to_numeric(trades["entry_price"], errors="coerce").fillna(0.0)
+                        ).sum()
+                    )
+                if equity > 0 and exposure > 0:
+                    display_exposure_pct = (exposure / equity) * 100.0
+    except Exception:
+        pass
+
     return {
-        "total_equity": float(r.get("account_balance", r.get("equity", 0.0)) or 0.0),
-        "daily_pnl": float(r.get("total_pnl", r.get("daily_pnl", 0.0)) or 0.0),
+        "total_equity": float(equity),
+        "daily_pnl": float(display_pnl),
         "ai_bias": str(ai.get("bias", m.get("bias", "NEUTRAL"))).upper(),
         "confidence": float(ai.get("confidence", m.get("confidence", 0.0)) or 0.0),
-        "risk_exposure": float(r.get("exposure_pct", r.get("exposure", 0.0)) or 0.0),
+        "risk_exposure": float(display_exposure_pct),
     }
 
 

@@ -284,12 +284,25 @@ def _worker_risk_snapshot() -> dict[str, Any] | None:
         return None
 
     account_balance = _safe_float(getattr(risk_manager, "account_balance", DEFAULT_ACCOUNT_EQUITY), DEFAULT_ACCOUNT_EQUITY)
-    total_pnl = _safe_float(getattr(risk_manager, "total_pnl", 0.0), 0.0)
-    daily_pnl = _safe_float(getattr(risk_manager, "daily_pnl", 0.0), 0.0)
+    realized_total_pnl = _safe_float(getattr(risk_manager, "total_pnl", 0.0), 0.0)
+    realized_daily_pnl = _safe_float(getattr(risk_manager, "daily_pnl", 0.0), 0.0)
+    if callable(getattr(risk_manager, "get_status", None)):
+        try:
+            status_payload = risk_manager.get_status()
+            if isinstance(status_payload, dict):
+                realized_total_pnl = _safe_float(status_payload.get("total_pnl"), realized_total_pnl)
+                realized_daily_pnl = _safe_float(
+                    status_payload.get("daily_realized_pnl", status_payload.get("daily_pnl")),
+                    realized_daily_pnl,
+                )
+        except Exception:
+            pass
+
     exchange_snapshot = _worker_exchange_snapshot(include_open_orders=True)
     exchange_positions = list(exchange_snapshot.get("positions", []))
     open_orders_count = len(exchange_snapshot.get("open_orders", []))
     positions = exchange_positions if exchange_positions else _worker_risk_manager_positions_snapshot()
+    unrealized_pnl = sum(_safe_float(p.get("unrealized_pnl"), 0.0) for p in positions)
 
     exposure = sum(
         _safe_float(
@@ -299,12 +312,18 @@ def _worker_risk_snapshot() -> dict[str, Any] | None:
         for p in positions
     )
     exposure_pct = (exposure / account_balance * 100.0) if account_balance > 0 else 0.0
+    total_pnl = realized_total_pnl + unrealized_pnl
+    daily_pnl = realized_daily_pnl + unrealized_pnl
+    equity = account_balance + unrealized_pnl
 
     return {
         "account_balance": account_balance,
-        "equity": account_balance,
+        "equity": equity,
         "total_pnl": total_pnl,
         "daily_pnl": daily_pnl,
+        "realized_total_pnl": realized_total_pnl,
+        "realized_daily_pnl": realized_daily_pnl,
+        "unrealized_pnl": unrealized_pnl,
         "exposure_pct": exposure_pct,
         "exposure": exposure,
         "open_positions": len(positions),
