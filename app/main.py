@@ -162,11 +162,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         paper_mode = _env_bool("TRADING_PAPER_MODE", True)
         sandbox_mode = _env_bool("KRAKEN_FUTURES_DEMO", True)
+        api_key = os.getenv("KRAKEN_API_KEY", "")
+        api_secret = os.getenv("KRAKEN_API_SECRET", "")
+        if not paper_mode and (not api_key or not api_secret):
+            logger.warning(
+                "TRADING_PAPER_MODE=false but KRAKEN_API_KEY/KRAKEN_API_SECRET missing; falling back to paper mode"
+            )
+            paper_mode = True
 
         execution_engine = ExecutionEngine(
             exchange_id="krakenfutures",
-            api_key=os.getenv("KRAKEN_API_KEY", ""),
-            api_secret=os.getenv("KRAKEN_API_SECRET", ""),
+            api_key=api_key,
+            api_secret=api_secret,
             paper_mode=paper_mode,
             sandbox=sandbox_mode,
         )
@@ -267,7 +274,7 @@ app.include_router(routes_data.router, tags=["data"])
 app.include_router(routes_risk.router)
 app.include_router(routes_momentum.router)
 app.include_router(routes_indicators.router, prefix="/indicators", tags=["indicators"])
-app.include_router(routes_strategy.router, prefix="/strategy", tags=["strategy"])
+app.include_router(routes_strategy.router)
 app.include_router(routes_backtest.router)
 app.include_router(routes_webhooks.router, prefix="/api", tags=["webhooks"])
 
@@ -376,6 +383,8 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
                 
                 # Send price update with signals
                 response = {
+                    "type": "price",
+                    "ts": datetime.now(timezone.utc).isoformat(),
                     "symbol": symbol,
                     "price": price,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -405,6 +414,35 @@ async def websocket_prices(websocket: WebSocket, symbol: str) -> None:
             await websocket.close()
         except Exception:
             pass
+
+
+@app.websocket("/api/v1/ws/market")
+async def websocket_market_v1(websocket: WebSocket, topics: str = "market") -> None:
+    """Compatibility WebSocket endpoint for v1 clients."""
+    await websocket.accept()
+    await websocket.send_json(
+        {
+            "type": "heartbeat",
+            "topic": "market",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    try:
+        while True:
+            await asyncio.sleep(30)
+            await websocket.send_json(
+                {
+                    "type": "heartbeat",
+                    "topic": "market",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+    except WebSocketDisconnect:
+        logger.info("Client disconnected from /api/v1/ws/market")
+    except Exception as exc:
+        logger.error("v1 market websocket error: %s", exc)
+        with suppress(Exception):
+            await websocket.close()
 
 
 @app.websocket("/ws/price")
