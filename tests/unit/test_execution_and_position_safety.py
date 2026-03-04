@@ -305,8 +305,9 @@ def test_entry_gate_allows_high_quality_setup(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPatch) -> None:
+
     monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
-    monkeypatch.setenv("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "48")
+    monkeypatch.setenv("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "50")
 
     worker = MomentumWorker(
         symbol="PI_XBTUSD",
@@ -336,8 +337,8 @@ def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPat
 
     assert exit_signal is not None
     assert exit_signal["side"] == "sell"
-    assert exit_signal["exit_reason"] == "confidence_below_48"
-    assert worker.last_exit_gate_snapshot.get("reason") == "confidence_below_48"
+    assert exit_signal["exit_reason"] == "confidence_below_50"
+    assert worker.last_exit_gate_snapshot.get("reason") == "confidence_below_50"
 
 
 def test_exit_gate_does_not_trigger_when_conditions_are_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,3 +372,51 @@ def test_exit_gate_does_not_trigger_when_conditions_are_healthy(monkeypatch: pyt
 
     assert exit_signal is None
     assert worker.last_exit_gate_snapshot.get("reason", "") == ""
+
+
+def test_exit_gate_equality_boundaries_do_not_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+
+    guard = {
+        "stop_price": 72000.0,
+        "risk_r": 0.02,
+        "entry_momentum": 1.0,
+        "entry_atr": 45.0,
+    }
+    context = {
+        "confidence": 50.0,
+        "composite_long": 0.15,
+        "trend_score": 0.10,
+        "pattern_long": 0.10,
+        "imbalance_long": 0.10,
+        "imbalance_short": 0.25,
+        "momentum": 1.1,
+        "atr": 50.0,
+        "vol_ma20": 1000.0,
+        "vol_last": 1000.0,
+        "correlation": 0.10,
+        "reversal_long": False,
+    }
+
+    reason, snapshot = worker._evaluate_exit_logic(
+        position_side="buy",
+        context=context,
+        current_price=73100.0,
+        entry_price=73000.0,
+        bars_held=0,
+        guard=guard,
+    )
+
+    assert reason == ""
+    assert snapshot["gates"]["confidence_break"] is False
+    assert snapshot["gates"]["composite_break"] is False
+    assert snapshot["gates"]["trend_break"] is False
+    assert snapshot["gates"]["pattern_break"] is False
+    assert snapshot["gates"]["imbalance_break"] is False
+    assert snapshot["gates"]["opposite_imbalance_spike"] is False

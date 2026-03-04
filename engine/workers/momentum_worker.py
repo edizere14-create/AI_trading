@@ -160,16 +160,16 @@ class MomentumWorker:
         )
         self.enforce_exit_execution_gates = self._env_bool("MOMENTUM_ENFORCE_EXIT_GATES", True)
         self.exit_confidence_floor_pct = float(
-            os.environ.get("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "48.0") or "48.0"
+            os.environ.get("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "50.0") or "50.0"
         )
         self.exit_confidence_floor_pct = max(0.0, min(self.exit_confidence_floor_pct, 100.0))
         self.exit_composite_floor = float(os.environ.get("MOMENTUM_EXIT_COMPOSITE_FLOOR", "0.15") or "0.15")
         self.exit_composite_floor = max(0.0, min(self.exit_composite_floor, 1.0))
-        self.exit_trend_floor = float(os.environ.get("MOMENTUM_EXIT_TREND_FLOOR", "0.05") or "0.05")
+        self.exit_trend_floor = float(os.environ.get("MOMENTUM_EXIT_TREND_FLOOR", "0.10") or "0.10")
         self.exit_trend_floor = max(0.0, min(self.exit_trend_floor, 1.0))
         self.exit_pattern_floor = float(os.environ.get("MOMENTUM_EXIT_PATTERN_FLOOR", "0.10") or "0.10")
         self.exit_pattern_floor = max(0.0, min(self.exit_pattern_floor, 1.0))
-        self.exit_imbalance_floor = float(os.environ.get("MOMENTUM_EXIT_IMBALANCE_FLOOR", "0.05") or "0.05")
+        self.exit_imbalance_floor = float(os.environ.get("MOMENTUM_EXIT_IMBALANCE_FLOOR", "0.10") or "0.10")
         self.exit_imbalance_floor = max(0.0, min(self.exit_imbalance_floor, 1.0))
         self.exit_opposite_imbalance_spike = float(
             os.environ.get("MOMENTUM_EXIT_OPPOSITE_IMBALANCE_SPIKE", "0.25") or "0.25"
@@ -936,11 +936,11 @@ class MomentumWorker:
             "gates": {
                 "loss_cut": loss_pct >= self.exit_max_loss_pct,
                 "confidence_break": confidence < self.exit_confidence_floor_pct,
-                "composite_break": composite <= self.exit_composite_floor,
-                "trend_break": trend <= self.exit_trend_floor,
-                "pattern_break": pattern <= self.exit_pattern_floor,
-                "imbalance_break": imbalance <= self.exit_imbalance_floor,
-                "opposite_imbalance_spike": opposite_imbalance >= self.exit_opposite_imbalance_spike,
+                "composite_break": composite < self.exit_composite_floor,
+                "trend_break": trend < self.exit_trend_floor,
+                "pattern_break": pattern < self.exit_pattern_floor,
+                "imbalance_break": imbalance < self.exit_imbalance_floor,
+                "opposite_imbalance_spike": opposite_imbalance > self.exit_opposite_imbalance_spike,
             },
         }
 
@@ -950,15 +950,15 @@ class MomentumWorker:
                 reason = f"loss_cut_2pct{suffix}"
             elif confidence < self.exit_confidence_floor_pct:
                 reason = f"confidence_below_{int(self.exit_confidence_floor_pct)}{suffix}"
-            elif composite <= self.exit_composite_floor:
+            elif composite < self.exit_composite_floor:
                 reason = f"composite_below_{self.exit_composite_floor:.2f}{suffix}"
-            elif trend <= self.exit_trend_floor:
+            elif trend < self.exit_trend_floor:
                 reason = f"trend_below_{self.exit_trend_floor:.2f}{suffix}"
-            elif pattern <= self.exit_pattern_floor:
+            elif pattern < self.exit_pattern_floor:
                 reason = f"pattern_below_{self.exit_pattern_floor:.2f}{suffix}"
-            elif imbalance <= self.exit_imbalance_floor:
+            elif imbalance < self.exit_imbalance_floor:
                 reason = f"imbalance_below_{self.exit_imbalance_floor:.2f}{suffix}"
-            elif opposite_imbalance >= self.exit_opposite_imbalance_spike:
+            elif opposite_imbalance > self.exit_opposite_imbalance_spike:
                 reason = f"opposite_imbalance_spike{suffix}"
 
         r_value = float(guard.get("risk_r", self.exit_max_loss_pct))
