@@ -211,10 +211,6 @@ class ExecutionEngine:
         if raw in markets:
             return raw
 
-        by_id_symbol = self._market_symbol_by_id(raw)
-        if by_id_symbol:
-            return by_id_symbol
-
         upper = raw.upper()
         static_aliases = {
             "PI_XBTUSD": "BTC/USD:USD",
@@ -231,6 +227,10 @@ class ExecutionEngine:
         alias = static_aliases.get(upper)
         if alias and alias in markets:
             return alias
+
+        by_id_symbol = self._market_symbol_by_id(raw)
+        if by_id_symbol:
+            return by_id_symbol
 
         if upper.startswith("PI_"):
             by_id_symbol = self._market_symbol_by_id(upper.replace("PI_", "PF_", 1))
@@ -546,4 +546,32 @@ class ExecutionEngine:
             return result
         except Exception as e:
             logger.error("Execution failed: %s", e, exc_info=True)
-            return None
+            message = str(e)
+            text = message.lower()
+            reason = "execution_error"
+            if isinstance(e, ccxt.InsufficientFunds) or "insufficientavailablefunds" in text:
+                reason = "insufficient_funds"
+            elif "wouldnotreduceposition" in text:
+                reason = "would_not_reduce_position"
+
+            quantity = 0.0
+            try:
+                quantity = float(signal.get("quantity", 0.0) or 0.0)
+            except Exception:
+                quantity = 0.0
+
+            return {
+                "id": None,
+                "status": OrderStatus.REJECTED.value,
+                "symbol": str(signal.get("symbol", "")),
+                "side": str(signal.get("side", "")).lower(),
+                "quantity": quantity,
+                "filled": 0.0,
+                "avg_fill_price": None,
+                "price": None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "metrics": {"slippage": 0.0, "fill_rate": 0.0, "latency_ms": 0.0},
+                "reason": reason,
+                "error": message,
+                "raw": {"error": message},
+            }

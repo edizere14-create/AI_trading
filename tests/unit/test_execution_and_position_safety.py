@@ -49,6 +49,26 @@ class _WouldNotReduceExchange(_DummyExchange):
         raise Exception("krakenfutures: createOrder failed due to wouldNotReducePosition")
 
 
+class _InsufficientFundsExchange(_DummyExchange):
+    def create_order(self, symbol: str, type: str, side: str, amount: float, price=None, params=None):
+        self._last_amount = float(amount)
+        self.last_params = dict(params or {})
+        raise Exception("krakenfutures: createOrder failed due to insufficientAvailableFunds")
+
+
+class _DualMarketExchange(_DummyExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        linear_market = {
+            "symbol": "BTC/USD:USD",
+            "contract": True,
+            "contractSize": 1.0,
+            "inverse": False,
+            "linear": True,
+        }
+        self.markets["BTC/USD:USD"] = linear_market
+
+
 def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
@@ -103,6 +123,48 @@ def test_reduce_only_would_not_reduce_is_treated_as_cancelled() -> None:
     assert result is not None
     assert result["status"] == "cancelled"
     assert (result.get("raw") or {}).get("reason") == "would_not_reduce_position"
+
+
+def test_insufficient_funds_returns_rejected_payload() -> None:
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _InsufficientFundsExchange()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "quantity": 0.001,
+            "order_kind": "taker",
+            "strategy_id": "momentum_v1",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "rejected"
+    assert result.get("reason") == "insufficient_funds"
+
+
+def test_symbol_resolution_prefers_linear_alias_when_available() -> None:
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _DualMarketExchange()
+
+    resolved = engine._resolve_exchange_symbol("PI_XBTUSD")
+    assert resolved == "BTC/USD:USD"
 
 
 def test_symbol_matching_is_strict_after_normalization() -> None:

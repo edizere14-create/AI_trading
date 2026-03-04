@@ -1434,14 +1434,22 @@ class MomentumWorker:
                 logger.info("Executing exit logic signal: %s", exit_signal)
                 self.last_decision_reason = f"executing_exit:{str(exit_signal.get('exit_reason', 'unknown'))}"
                 exit_result = self.execution_engine.execute(exit_signal)
+                exit_status = str((exit_result or {}).get("status", "")).lower()
+                if exit_status in {"rejected", "cancelled", "canceled"}:
+                    detail = str(
+                        (exit_result or {}).get("reason")
+                        or (exit_result or {}).get("error")
+                        or exit_status
+                    )
+                    self.last_decision_reason = f"exit_rejected:{detail}"
                 order_record, trade_record = self._build_order_record(exit_signal, exit_result)
                 self.signal_history.append(order_record)
                 if trade_record:
                     self.trade_history.append(trade_record)
                     self._persist_trade(trade_record)
-                if exit_result:
+                if exit_result and exit_status not in {"rejected", "cancelled", "canceled"}:
                     self.last_decision_reason = "exit_submitted"
-                else:
+                elif not exit_result:
                     self.last_decision_reason = "exit_execution_returned_none"
                 await self._sync_live_exchange_state()
                 return
@@ -1503,7 +1511,19 @@ class MomentumWorker:
                 logger.info("Executing momentum signal: %s", signal)
                 self.last_decision_reason = "executing_entry"
                 result = self.execution_engine.execute(signal)
-                if result:
+                result_status = str((result or {}).get("status", "")).lower()
+                if result and result_status in {"rejected", "cancelled", "canceled"}:
+                    order_record, trade_record = self._build_order_record(signal, result)
+                    self.signal_history.append(order_record)
+                    detail = str(
+                        (result or {}).get("reason")
+                        or (result or {}).get("error")
+                        or result_status
+                    )
+                    self.last_decision_reason = f"entry_rejected:{detail}"
+                    logger.warning("Execution rejected: %s", detail)
+                    await self._sync_live_exchange_state()
+                elif result:
                     self.execution_count += 1
                     self.trade_count += 1
 
