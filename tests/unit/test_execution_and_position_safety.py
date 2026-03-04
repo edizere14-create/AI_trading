@@ -69,6 +69,11 @@ class _DualMarketExchange(_DummyExchange):
         self.markets["BTC/USD:USD"] = linear_market
 
 
+class _MinimalExecutionEngine:
+    def __init__(self, paper_mode: bool) -> None:
+        self.paper_mode = paper_mode
+
+
 def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
@@ -181,3 +186,45 @@ def test_contracts_to_base_quantity_uses_inverse_hint() -> None:
         is_inverse=True,
     )
     assert qty == pytest.approx(0.001, rel=1e-4)
+
+
+def test_high_confidence_forces_market_taker_preference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_LIVE_MAKER_ONLY", "true")
+    monkeypatch.setenv("MOMENTUM_LIVE_TAKER_ON_HIGH_CONFIDENCE", "true")
+    monkeypatch.setenv("MOMENTUM_LIVE_TAKER_CONFIDENCE_THRESHOLD", "80")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    worker._last_context_metrics = {"confidence": 95.0}
+
+    signal = {"side": "buy", "price": 73000.0, "order_type": "limit", "order_kind": "maker"}
+    updated = worker._apply_live_order_preferences(signal)
+
+    assert updated["order_type"] == "market"
+    assert updated["order_kind"] == "taker"
+    assert "price" not in updated
+    assert updated.get("expected_price") == pytest.approx(73000.0)
+
+
+def test_lower_confidence_keeps_maker_limit_preference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_LIVE_MAKER_ONLY", "true")
+    monkeypatch.setenv("MOMENTUM_LIVE_MAKER_OFFSET_BPS", "8")
+    monkeypatch.setenv("MOMENTUM_LIVE_TAKER_ON_HIGH_CONFIDENCE", "true")
+    monkeypatch.setenv("MOMENTUM_LIVE_TAKER_CONFIDENCE_THRESHOLD", "90")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    worker._last_context_metrics = {"confidence": 65.0}
+
+    signal = {"side": "sell", "price": 73000.0}
+    updated = worker._apply_live_order_preferences(signal)
+
+    assert updated["order_type"] == "limit"
+    assert updated["order_kind"] == "maker"
+    assert updated["price"] == pytest.approx(73000.0 * (1.0 + 0.0008), rel=1e-6)

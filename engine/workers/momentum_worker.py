@@ -111,6 +111,14 @@ class MomentumWorker:
         except (TypeError, ValueError):
             self.live_maker_offset_bps = 8.0
         self.live_maker_offset_bps = max(0.0, min(self.live_maker_offset_bps, 500.0))
+        self.live_taker_high_confidence = self._env_bool("MOMENTUM_LIVE_TAKER_ON_HIGH_CONFIDENCE", True)
+        try:
+            self.live_taker_confidence_threshold = float(
+                os.environ.get("MOMENTUM_LIVE_TAKER_CONFIDENCE_THRESHOLD", "90.0") or "90.0"
+            )
+        except (TypeError, ValueError):
+            self.live_taker_confidence_threshold = 90.0
+        self.live_taker_confidence_threshold = max(0.0, min(self.live_taker_confidence_threshold, 100.0))
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
         try:
@@ -916,14 +924,49 @@ class MomentumWorker:
 
         return None
 
+    def _entry_confidence_pct(self, signal: Dict[str, Any]) -> float:
+        candidates = [
+            signal.get("confidence_pct"),
+            signal.get("confidence"),
+            self._last_context_metrics.get("confidence"),
+        ]
+        for value in candidates:
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                continue
+            # Normalize 0-1 confidence values to percentages.
+            if 0.0 <= score <= 1.0:
+                score *= 100.0
+            if score >= 0.0:
+                return min(100.0, score)
+        return 0.0
+
     def _apply_live_order_preferences(self, signal: Dict[str, Any]) -> Dict[str, Any]:
         if getattr(self.execution_engine, "paper_mode", True):
-            return signal
-        if not self.live_maker_only:
             return signal
 
         side = str(signal.get("side", "")).lower()
         if side not in {"buy", "sell"}:
+            return signal
+
+        confidence_pct = self._entry_confidence_pct(signal)
+        if self.live_taker_high_confidence and confidence_pct >= self.live_taker_confidence_threshold:
+            reference_price = self._reference_price(signal)
+            signal["order_kind"] = "taker"
+            signal["order_type"] = "market"
+            if reference_price is not None and reference_price > 0:
+                signal["expected_price"] = signal.get("expected_price") or reference_price
+            signal.pop("price", None)
+            logger.info(
+                "Applied high-confidence taker preference | side=%s confidence=%.2f threshold=%.2f",
+                side,
+                confidence_pct,
+                self.live_taker_confidence_threshold,
+            )
+            return signal
+
+        if not self.live_maker_only:
             return signal
 
         reference_price = self._reference_price(signal)
