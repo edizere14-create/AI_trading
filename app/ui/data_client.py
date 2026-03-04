@@ -277,6 +277,9 @@ def get_metrics(api_url: str) -> dict[str, Any]:
 
         ai = get_ai_insight(api_url)
         trades = get_active_trades(api_url)
+        daily_pnl = 0.0
+        if not trades.empty and "unrealized_pnl" in trades.columns:
+            daily_pnl = float(pd.to_numeric(trades["unrealized_pnl"], errors="coerce").fillna(0.0).sum())
         exposure = 0.0
         if not trades.empty and "notional" in trades.columns:
             exposure = float(pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0).sum())
@@ -289,7 +292,7 @@ def get_metrics(api_url: str) -> dict[str, Any]:
         exposure_pct = (exposure / equity * 100.0) if equity > 0 else 0.0
         return {
             "total_equity": float(equity),
-            "daily_pnl": 0.0,
+            "daily_pnl": float(daily_pnl),
             "ai_bias": str(ai.get("bias", "NEUTRAL")).upper(),
             "confidence": float(ai.get("confidence", 0.0) or 0.0),
             "risk_exposure": float(exposure_pct),
