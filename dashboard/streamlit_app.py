@@ -341,6 +341,22 @@ with st.sidebar.expander("Diagnostics", expanded=False):
                 st.text(response.text[:1500])
         except Exception as exc:
             st.error(f"Diagnostics request failed: {exc}")
+    elif st.button("Check /momentum/orders-sync", key="diag_momentum_orders_sync"):
+        sync_url = f"{api_url.rstrip('/')}/momentum/orders-sync"
+        try:
+            response = requests.get(
+                sync_url,
+                params={"limit": 25},
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            st.write({"status_code": response.status_code, "url": response.url})
+            try:
+                payload = response.json()
+                st.json(payload)
+            except Exception:
+                st.text(response.text[:1500])
+        except Exception as exc:
+            st.error(f"Diagnostics request failed: {exc}")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Risk Preview")

@@ -48,6 +48,31 @@ def _finite_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _symbol_key(value: str) -> str:
+    raw = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+    if raw.startswith("PI"):
+        raw = raw[2:]
+    if raw.startswith("PF"):
+        raw = raw[2:]
+    raw = raw.replace("XBT", "BTC")
+    return raw
+
+
+def _symbols_match(a: str, b: str) -> bool:
+    ka = _symbol_key(a)
+    kb = _symbol_key(b)
+    if not ka or not kb:
+        return False
+    return ka == kb or ka in kb or kb in ka
+
+
 def _latest_worker_price() -> float | None:
     global momentum_worker
     if momentum_worker is None:
@@ -158,6 +183,84 @@ def _build_data_service(exchange_id: str):
         return DataService(exchange_id=exchange_id)
     except TypeError:
         return DataService()
+
+
+async def _fetch_exchange_order_state(worker: Any) -> dict[str, Any]:
+    execution_engine = getattr(worker, "execution_engine", None)
+    if execution_engine is None:
+        return {"mode": "paper", "open_orders": [], "positions": [], "errors": []}
+
+    if getattr(execution_engine, "paper_mode", True):
+        return {"mode": "paper", "open_orders": [], "positions": [], "errors": []}
+
+    exchange = getattr(execution_engine, "exchange", None)
+    if exchange is None:
+        return {"mode": "live", "open_orders": [], "positions": [], "errors": ["exchange_not_initialized"]}
+
+    symbol_hint = str(getattr(worker, "symbol", "") or "")
+
+    def _sync_fetch() -> dict[str, Any]:
+        errors: list[str] = []
+        open_orders: list[dict[str, Any]] = []
+        positions: list[dict[str, Any]] = []
+
+        try:
+            rows = exchange.fetch_open_orders()
+            if isinstance(rows, list):
+                open_orders = rows
+        except Exception as exc:
+            errors.append(f"fetch_open_orders:{exc}")
+            if symbol_hint:
+                try:
+                    rows = exchange.fetch_open_orders(symbol_hint)
+                    if isinstance(rows, list):
+                        open_orders = rows
+                except Exception as exc2:
+                    errors.append(f"fetch_open_orders(symbol):{exc2}")
+
+        try:
+            rows = exchange.fetch_positions()
+            if isinstance(rows, list):
+                positions = rows
+        except Exception as exc:
+            errors.append(f"fetch_positions:{exc}")
+            if symbol_hint:
+                try:
+                    rows = exchange.fetch_positions([symbol_hint])
+                    if isinstance(rows, list):
+                        positions = rows
+                except Exception as exc2:
+                    errors.append(f"fetch_positions(symbol):{exc2}")
+
+        return {"mode": "live", "open_orders": open_orders, "positions": positions, "errors": errors}
+
+    return await asyncio.to_thread(_sync_fetch)
+
+
+def _position_lookup(positions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        qty = _safe_float(pos.get("contracts"), 0.0)
+        if qty == 0:
+            continue
+        symbol = str(pos.get("symbol") or pos.get("id") or "")
+        if not symbol:
+            continue
+        out[_symbol_key(symbol)] = pos
+    return out
+
+
+def _open_order_lookup(open_orders: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in open_orders:
+        if not isinstance(row, dict):
+            continue
+        order_id = str(row.get("id") or "").strip()
+        if order_id:
+            out[order_id] = row
+    return out
 
 
 def _coerce_candles_df(payload: Any) -> pd.DataFrame:
@@ -349,6 +452,105 @@ async def get_momentum_history(limit: int = Query(50, ge=1, le=500)) -> dict[str
     signals = list(getattr(momentum_worker, "signal_history", []))[-limit:]
     candles = list(getattr(momentum_worker, "candle_history", []))[-limit:]
     return {"signals": signals, "candles": candles}
+
+
+@router.get("/orders-sync")
+async def get_momentum_orders_sync(limit: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
+    global momentum_worker
+    if momentum_worker is None:
+        return {
+            "status": "unavailable",
+            "reason": "momentum_worker_not_initialized",
+            "orders": [],
+            "open_orders_count": 0,
+            "open_positions_count": 0,
+        }
+
+    history = list(getattr(momentum_worker, "signal_history", []))
+    recent = [row for row in history if isinstance(row, dict)][-limit:]
+    exchange_state = await _fetch_exchange_order_state(momentum_worker)
+    open_orders = exchange_state.get("open_orders", [])
+    positions = exchange_state.get("positions", [])
+    open_orders_by_id = _open_order_lookup(open_orders if isinstance(open_orders, list) else [])
+    positions_by_symbol = _position_lookup(positions if isinstance(positions, list) else [])
+
+    rows: list[dict[str, Any]] = []
+    for row in reversed(recent):
+        order_id = str(row.get("order_id") or "").strip()
+        symbol = str(row.get("symbol") or "")
+        side = str(row.get("side") or "").lower()
+        local_status = str(row.get("status") or "").lower()
+        key = _symbol_key(symbol)
+        position = positions_by_symbol.get(key)
+        if position is None and symbol and isinstance(positions, list):
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                pos_symbol = str(pos.get("symbol") or pos.get("id") or "")
+                if _symbols_match(symbol, pos_symbol):
+                    position = pos
+                    break
+        has_position = position is not None
+        exchange_order = open_orders_by_id.get(order_id) if order_id else None
+
+        progress_state = "unknown"
+        exchange_status = None
+        amount = None
+        remaining = None
+        filled_qty = None
+
+        if isinstance(exchange_order, dict):
+            exchange_status = str(exchange_order.get("status") or "open").lower()
+            amount = _safe_float(exchange_order.get("amount"), 0.0)
+            remaining = _safe_float(exchange_order.get("remaining"), 0.0)
+            filled_qty = max(0.0, amount - remaining) if amount > 0 else _safe_float(exchange_order.get("filled"), 0.0)
+            if filled_qty > 0 and remaining > 0:
+                progress_state = "partially_filled_open"
+            else:
+                progress_state = "open"
+        elif has_position:
+            progress_state = "filled_or_partially_filled"
+        elif local_status in {"filled", "partial"}:
+            progress_state = "filled_or_partially_filled"
+        elif local_status in {"cancelled", "canceled", "rejected", "expired"}:
+            progress_state = "closed_or_canceled"
+        elif local_status in {"submitted", "pending", "open"}:
+            progress_state = "closed_or_canceled"
+
+        rows.append(
+            {
+                "order_id": order_id,
+                "symbol": symbol,
+                "side": side,
+                "timestamp": row.get("timestamp"),
+                "local_status": local_status or None,
+                "exchange_status": exchange_status,
+                "progress_state": progress_state,
+                "filled_quantity": filled_qty,
+                "remaining_quantity": remaining,
+                "amount": amount,
+                "has_open_position": has_position,
+                "position_symbol": (
+                    str(position.get("symbol") or position.get("id") or "")
+                    if isinstance(position, dict)
+                    else None
+                ),
+                "position_contracts": (
+                    _safe_float(position.get("contracts"), 0.0)
+                    if isinstance(position, dict)
+                    else 0.0
+                ),
+            }
+        )
+
+    return {
+        "status": "ok",
+        "mode": exchange_state.get("mode"),
+        "errors": exchange_state.get("errors", []),
+        "open_orders_count": len(open_orders if isinstance(open_orders, list) else []),
+        "open_positions_count": len([p for p in (positions if isinstance(positions, list) else []) if _safe_float(p.get("contracts"), 0.0) != 0.0]),
+        "orders": rows,
+    }
 
 
 @router.get("/analytics")
