@@ -255,12 +255,42 @@ def _contracts_to_display_quantity(symbol: str, contracts: float, price: float, 
 
 
 def get_worker_status(api_url: str) -> dict[str, Any]:
+    candidates: list[str] = []
     if _all_in_one_enabled(api_url):
-        return {}
+        backend_port = (os.getenv("BACKEND_PORT", "8000").strip() or "8000")
+        internal_api = os.getenv("INTERNAL_API_URL", "").strip()
+        if internal_api:
+            candidates.append(internal_api)
+        candidates.extend(
+            [
+                f"http://127.0.0.1:{backend_port}",
+                f"http://localhost:{backend_port}",
+            ]
+        )
+    else:
+        candidates.append(str(api_url or "").strip())
 
-    data = _get_json(f"{api_url}/momentum/status")
+    seen: set[str] = set()
+    normalized_candidates: list[str] = []
+    for base in candidates:
+        key = base.rstrip("/")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized_candidates.append(key)
+
+    data: Any = None
+    for base in normalized_candidates:
+        try:
+            data = _get_json(f"{base}/momentum/status")
+            break
+        except ApiContractError:
+            continue
+
+    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+        data = data.get("data")
     if not isinstance(data, dict):
-        raise ApiContractError("Contract mismatch: /momentum/status must return an object.")
+        return {}
 
     def _safe_int(value: Any, default: int = 0) -> int:
         try:

@@ -55,6 +55,46 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_safe(item())
+        except Exception:
+            pass
+
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _json_safe(tolist())
+        except Exception:
+            pass
+
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except Exception:
+            pass
+
+    return str(value)
+
+
 def _symbol_key(value: str) -> str:
     raw = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
     if raw.startswith("PI"):
@@ -416,14 +456,36 @@ async def get_momentum_status() -> dict[str, Any]:
     status = momentum_worker.get_status()
     if isinstance(status, dict):
         ai = _worker_analytics()
-        status["ai"] = ai
-        status["analytics"] = ai
-        status["confidence"] = ai.get("confidence", 0.0)
-        status["bias"] = ai.get("bias", "NEUTRAL")
+        safe_status: dict[str, Any] = {
+            "is_running": bool(status.get("is_running", False)),
+            "symbol": str(status.get("symbol", fallback_symbol) or fallback_symbol),
+            "signal_count": int(_safe_float(status.get("signal_count", 0), 0.0)),
+            "execution_count": int(_safe_float(status.get("execution_count", 0), 0.0)),
+            "interval": str(status.get("interval", "") or ""),
+            "last_decision_reason": str(status.get("last_decision_reason", "") or ""),
+            "startup_error": startup_error,
+        }
+        if isinstance(status.get("risk"), dict):
+            safe_status["risk"] = _json_safe(status.get("risk"))
+        else:
+            safe_status["risk"] = {
+                "account_balance": 0.0,
+                "drawdown_pct": 0.0,
+                "daily_loss": 0.0,
+                "total_pnl": 0.0,
+                "open_positions": 0,
+            }
+        if isinstance(status.get("last_signal"), dict):
+            safe_status["last_signal"] = _json_safe(status.get("last_signal"))
+
+        safe_status["ai"] = ai
+        safe_status["analytics"] = ai
+        safe_status["confidence"] = ai.get("confidence", 0.0)
+        safe_status["bias"] = ai.get("bias", "NEUTRAL")
         price = _latest_worker_price()
         if price is not None:
-            status["last_price"] = price
-        return status
+            safe_status["last_price"] = price
+        return safe_status
 
     ai = _fallback_analytics("Momentum status unavailable.")
     return {
