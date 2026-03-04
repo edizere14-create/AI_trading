@@ -49,6 +49,7 @@ class RiskManager:
         max_daily_loss_pct: float = 0.05,
         max_drawdown_pct: float = 0.15,
         max_concurrent_positions: int = 3,
+        daily_profit_target_pct: float = 0.10,
     ) -> None:
         # Accept RiskManager(RiskConfig(...))
         # Accept RiskManager(balance, RiskConfig(...))  <-- your current call
@@ -68,15 +69,24 @@ class RiskManager:
 
         self.account_balance = float(initial_balance)
         self.peak_balance = float(initial_balance)
+        self.start_of_day_balance = float(initial_balance)
 
         self.max_position_pct = float(max_position_pct)
         self.max_daily_loss_pct = float(max_daily_loss_pct)
         self.max_drawdown_pct = float(max_drawdown_pct)
         self.max_concurrent_positions = int(max_concurrent_positions)
+        self.daily_profit_target = float(daily_profit_target_pct)
+        self.daily_loss_limit = float(self.max_daily_loss_pct)
 
         self.positions: dict[str, dict[str, Any]] = {}
-        self.total_pnl = 0.0
-        self.daily_pnl = 0.0
+        self.total_pnl = 0.0  # Backward-compatible alias for total realized PnL
+        self.realized_pnl_total = 0.0
+        self.daily_pnl = 0.0  # Backward-compatible alias for daily realized PnL
+        self.daily_realized_pnl = 0.0
+        self.daily_gross_profit = 0.0
+        self.daily_gross_loss = 0.0  # positive absolute value of losses
+        self.daily_trade_count = 0
+        self.daily_win_count = 0
         self._daily_date = datetime.now(timezone.utc).date()
 
         self.kill_switch_active = False
@@ -103,14 +113,53 @@ class RiskManager:
     def _reset_daily_if_needed(self) -> None:
         today = datetime.now(timezone.utc).date()
         if today != self._daily_date:
-            logger.info("Daily PnL reset | prev_daily_pnl=%.2f", self.daily_pnl)
+            logger.info(
+                "Daily reset | prev_daily_realized_pnl=%.2f trades=%d wins=%d",
+                self.daily_realized_pnl,
+                self.daily_trade_count,
+                self.daily_win_count,
+            )
+            self.start_of_day_balance = float(self.account_balance)
+            self.daily_realized_pnl = 0.0
             self.daily_pnl = 0.0
+            self.daily_gross_profit = 0.0
+            self.daily_gross_loss = 0.0
+            self.daily_trade_count = 0
+            self.daily_win_count = 0
             self._daily_date = today
 
     def _drawdown_pct(self) -> float:
         if self.peak_balance <= 0:
             return 0.0
         return max(0.0, (self.peak_balance - self.account_balance) / self.peak_balance)
+
+    def calculate_daily_pnl(self) -> tuple[float, float]:
+        """
+        Calculates realized daily PnL from start of UTC day.
+        Returns: (pnl_value, pnl_percent)
+        """
+        self._reset_daily_if_needed()
+        pnl = float(self.account_balance - self.start_of_day_balance)
+        if self.start_of_day_balance <= 0:
+            return pnl, 0.0
+        pnl_pct = (pnl / self.start_of_day_balance) * 100.0
+        return pnl, pnl_pct
+
+    def can_trade(self) -> tuple[bool, str]:
+        """Enforces daily risk thresholds against realized PnL."""
+        self._reset_daily_if_needed()
+        _, pnl_percent = self.calculate_daily_pnl()
+
+        loss_limit_pct = self.daily_loss_limit * 100.0
+        if pnl_percent <= -loss_limit_pct:
+            self._activate_kill_switch("daily loss limit exceeded")
+            return False, "daily loss limit exceeded"
+
+        profit_target_pct = self.daily_profit_target * 100.0
+        if profit_target_pct > 0 and pnl_percent >= profit_target_pct:
+            return False, "daily profit target reached"
+
+        return True, "ok"
 
     def _activate_kill_switch(self, reason: str) -> None:
         if not self.kill_switch_active:
@@ -129,9 +178,9 @@ class RiskManager:
         if self.kill_switch_active:
             return False, f"kill-switch active: {self.kill_switch_reason}"
 
-        if self.daily_pnl <= -(self.account_balance * self.max_daily_loss_pct):
-            self._activate_kill_switch("daily loss limit exceeded")
-            return False, "daily loss limit exceeded"
+        can_trade_now, reason = self.can_trade()
+        if not can_trade_now:
+            return False, reason
 
         if self._drawdown_pct() >= self.max_drawdown_pct:
             self._activate_kill_switch("max drawdown exceeded")
@@ -184,8 +233,16 @@ class RiskManager:
         pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
 
         self.account_balance += pnl
-        self.total_pnl += pnl
-        self.daily_pnl += pnl
+        self.realized_pnl_total += pnl
+        self.total_pnl = self.realized_pnl_total  # keep legacy alias in sync
+        self.daily_realized_pnl += pnl
+        self.daily_pnl = self.daily_realized_pnl  # keep legacy alias in sync
+        self.daily_trade_count += 1
+        if pnl > 0:
+            self.daily_win_count += 1
+            self.daily_gross_profit += pnl
+        elif pnl < 0:
+            self.daily_gross_loss += abs(pnl)
         self.peak_balance = max(self.peak_balance, self.account_balance)
 
         del self.positions[symbol]
@@ -194,10 +251,43 @@ class RiskManager:
 
     def get_risk_metrics(self) -> dict[str, Any]:
         self._reset_daily_if_needed()
+        daily_pnl_value, daily_pnl_percent = self.calculate_daily_pnl()
+        win_rate = (
+            (self.daily_win_count / self.daily_trade_count) * 100.0
+            if self.daily_trade_count > 0
+            else 0.0
+        )
+        profit_factor = (
+            (self.daily_gross_profit / self.daily_gross_loss)
+            if self.daily_gross_loss > 0
+            else (None if self.daily_gross_profit > 0 else 0.0)
+        )
+        normalized_daily_pnl_per_1k = (
+            (daily_pnl_value / self.start_of_day_balance) * 1000.0
+            if self.start_of_day_balance > 0
+            else 0.0
+        )
+
         return {
             "account_balance": round(self.account_balance, 2),
+            "current_balance": round(self.account_balance, 2),
+            "start_of_day_balance": round(self.start_of_day_balance, 2),
             "total_pnl": round(self.total_pnl, 2),
-            "daily_loss": round(min(0.0, self.daily_pnl), 2),
+            "total_realized_pnl": round(self.realized_pnl_total, 2),
+            "daily_pnl": round(self.daily_realized_pnl, 2),
+            "daily_realized_pnl": round(self.daily_realized_pnl, 2),
+            "daily_pnl_percent": round(daily_pnl_percent, 4),
+            "daily_loss": round(min(0.0, self.daily_realized_pnl), 2),
+            "daily_profit": round(max(0.0, self.daily_realized_pnl), 2),
+            "daily_trade_count": int(self.daily_trade_count),
+            "daily_win_count": int(self.daily_win_count),
+            "win_rate": round(win_rate, 2),
+            "profit_factor": (round(profit_factor, 4) if isinstance(profit_factor, (int, float)) else None),
+            "daily_gross_profit": round(self.daily_gross_profit, 2),
+            "daily_gross_loss": round(self.daily_gross_loss, 2),
+            "daily_loss_limit_pct": round(self.daily_loss_limit * 100.0, 2),
+            "daily_profit_target_pct": round(self.daily_profit_target * 100.0, 2),
+            "normalized_daily_pnl_per_1k": round(normalized_daily_pnl_per_1k, 4),
             "drawdown_pct": round(self._drawdown_pct() * 100, 2),
             "open_positions": len(self.positions),
             "max_concurrent_positions": self.max_concurrent_positions,
@@ -211,6 +301,11 @@ class RiskManager:
         return {
             "account_balance": metrics.get("account_balance", self.account_balance),
             "daily_loss": metrics.get("daily_loss", 0.0),
+            "daily_pnl": metrics.get("daily_pnl", 0.0),
+            "daily_realized_pnl": metrics.get("daily_realized_pnl", 0.0),
+            "daily_pnl_percent": metrics.get("daily_pnl_percent", 0.0),
+            "win_rate": metrics.get("win_rate", 0.0),
+            "profit_factor": metrics.get("profit_factor"),
             "drawdown_pct": metrics.get("drawdown_pct", 0.0),
             "open_positions": metrics.get("open_positions", len(self.positions)),
             "kill_switch_active": metrics.get("kill_switch_active", False),
