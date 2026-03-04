@@ -99,7 +99,12 @@ class MomentumWorker:
         self.sell_threshold = float(kwargs.get("sell_threshold", -5.0))
         self.account_balance = account_balance
         
-        self.max_trades = 10  # <--- Add this line back
+        try:
+            self.max_trades = int(os.environ.get("MOMENTUM_MAX_TRADES", "0") or "0")
+        except (TypeError, ValueError):
+            self.max_trades = 0
+        if self.max_trades < 0:
+            self.max_trades = 0
         self.live_maker_only = self._env_bool("MOMENTUM_LIVE_MAKER_ONLY", True)
         try:
             self.live_maker_offset_bps = float(os.environ.get("MOMENTUM_LIVE_MAKER_OFFSET_BPS", "8") or "8")
@@ -183,6 +188,7 @@ class MomentumWorker:
 
         self.trade_count = 0
         self.trade_history: list[dict[str, Any]] = []
+        self.last_decision_reason = "initialized"
 
         # Keep recent candles/signals/trades in memory for API/dashboard
         self.candle_history: deque[dict[str, Any]] = deque(maxlen=2000)
@@ -1379,12 +1385,14 @@ class MomentumWorker:
         """Run one strategy iteration with risk gate + execution."""
         try:
             logger.info("🔄 Iteration started for %s", self.symbol)
+            self.last_decision_reason = "iteration_started"
             await self._sync_live_exchange_state()
 
             status = self.risk_manager.get_status()
             drawdown = status.get("drawdown_pct", 0)
             if drawdown > 20.0:
                 logger.critical("🛑 MAX DRAWDOWN BREACHED (%.2f%%) - STOPPING STRATEGY", drawdown)
+                self.last_decision_reason = "stopped_max_drawdown"
                 await self.stop()
                 return
 
@@ -1395,6 +1403,7 @@ class MomentumWorker:
             )
             if ohlcv is None:
                 logger.warning("Insufficient data for %s: 0 < %s", self.symbol, self.momentum_period)
+                self.last_decision_reason = "insufficient_data_none"
                 return
 
             candles = ohlcv
@@ -1407,6 +1416,7 @@ class MomentumWorker:
                     len(candles),
                     self.momentum_period,
                 )
+                self.last_decision_reason = "insufficient_data_short"
                 return
 
             await self._maybe_auto_train(candles)
@@ -1419,20 +1429,27 @@ class MomentumWorker:
                         "Exit signal queued but pending bot order exists for %s; waiting.",
                         exit_signal.get("symbol", self.symbol),
                     )
+                    self.last_decision_reason = "exit_pending_order"
                     return
                 logger.info("Executing exit logic signal: %s", exit_signal)
+                self.last_decision_reason = f"executing_exit:{str(exit_signal.get('exit_reason', 'unknown'))}"
                 exit_result = self.execution_engine.execute(exit_signal)
                 order_record, trade_record = self._build_order_record(exit_signal, exit_result)
                 self.signal_history.append(order_record)
                 if trade_record:
                     self.trade_history.append(trade_record)
                     self._persist_trade(trade_record)
+                if exit_result:
+                    self.last_decision_reason = "exit_submitted"
+                else:
+                    self.last_decision_reason = "exit_execution_returned_none"
                 await self._sync_live_exchange_state()
                 return
 
             signal = await self._generate_signal(candles)
             if not signal:
                 logger.info("No signal generated")
+                self.last_decision_reason = "no_signal_generated"
                 return
 
             self.signal_count += 1
@@ -1458,6 +1475,7 @@ class MomentumWorker:
                     "Skipping signal: pending bot order already open for symbol=%s",
                     symbol,
                 )
+                self.last_decision_reason = "entry_pending_order"
                 return
 
             if local_position_symbol:
@@ -1471,16 +1489,19 @@ class MomentumWorker:
                         local_position_symbol,
                         local_side or side,
                     )
+                    self.last_decision_reason = "position_open_same_side"
                     return
             else:
                 allowed, reason = self.risk_manager.check_risk_limits(signal)
 
             if not allowed:
                 logger.warning("Signal blocked by risk manager: %s | signal=%s", reason, signal)
+                self.last_decision_reason = f"risk_blocked:{reason}"
                 return
 
             try:
                 logger.info("Executing momentum signal: %s", signal)
+                self.last_decision_reason = "executing_entry"
                 result = self.execution_engine.execute(signal)
                 if result:
                     self.execution_count += 1
@@ -1494,21 +1515,26 @@ class MomentumWorker:
 
                     if self.max_trades and self.trade_count >= self.max_trades:
                         logger.info("Reached max trades (%s). Stopping worker.", self.max_trades)
+                        self.last_decision_reason = "stopped_max_trades"
                         await self.stop()
                         return
 
                     logger.info("Order placed: %s", result.get("id", result))
+                    self.last_decision_reason = "entry_submitted"
                     await self._sync_live_exchange_state()
                 else:
                     order_record, trade_record = self._build_order_record(signal, None)
                     self.signal_history.append(order_record)
                     logger.warning("Execution returned no result")
+                    self.last_decision_reason = "entry_execution_returned_none"
                     await self._sync_live_exchange_state()
             except Exception:
                 logger.exception("Order execution failed")
+                self.last_decision_reason = "entry_execution_exception"
 
         except Exception as e:
             logger.error("Iteration failed: %s", e, exc_info=True)
+            self.last_decision_reason = "iteration_exception"
 
     async def _load_ohlcv(self, symbol: str, timeframe: str, limit: int):
         """Load OHLCV candles with compatibility fallbacks across DataService versions."""
@@ -1744,6 +1770,7 @@ class MomentumWorker:
             "signal_count": self.signal_count,
             "execution_count": self.execution_count,
             "interval": self.interval,
+            "last_decision_reason": self.last_decision_reason,
         }
         base_status["risk"] = self.risk_manager.get_status()
         return base_status

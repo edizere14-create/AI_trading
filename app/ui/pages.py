@@ -11,6 +11,7 @@ from app.ui.data_client import (
     get_risk_preview,
     get_active_trades,
     get_open_orders,
+    get_worker_status,
     get_ai_insight,
     get_backtest,
     get_candles,
@@ -339,6 +340,12 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
         open_orders = pd.DataFrame()
     except Exception:
         open_orders = pd.DataFrame()
+    try:
+        worker_status = get_worker_status(api_url)
+    except ApiContractError:
+        worker_status = {}
+    except Exception:
+        worker_status = {}
 
     _metric_bar(metrics)
 
@@ -536,6 +543,20 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                 st.caption("Collateral bucket preview unavailable.")
 
     with right:
+        st.subheader("Bot Status")
+        if worker_status:
+            running = bool(worker_status.get("is_running", False))
+            state = "RUNNING" if running else "STOPPED"
+            st.caption(
+                f"{state} | signals={int(worker_status.get('signal_count', 0) or 0)} "
+                f"| executions={int(worker_status.get('execution_count', 0) or 0)}"
+            )
+            decision_reason = str(worker_status.get("last_decision_reason", "") or "").strip()
+            if decision_reason:
+                st.caption(f"Last decision: {decision_reason}")
+        else:
+            st.caption("Worker status unavailable.")
+
         st.subheader("Active Trades")
         if trades.empty:
             st.info("No active trades.")

@@ -254,6 +254,29 @@ def _contracts_to_display_quantity(symbol: str, contracts: float, price: float, 
     return qty_contracts * size
 
 
+def get_worker_status(api_url: str) -> dict[str, Any]:
+    if _all_in_one_enabled(api_url):
+        return {}
+
+    data = _get_json(f"{api_url}/momentum/status")
+    if not isinstance(data, dict):
+        raise ApiContractError("Contract mismatch: /momentum/status must return an object.")
+
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "is_running": bool(data.get("is_running", False)),
+        "symbol": str(data.get("symbol", "") or ""),
+        "signal_count": _safe_int(data.get("signal_count", 0), 0),
+        "execution_count": _safe_int(data.get("execution_count", 0), 0),
+        "last_decision_reason": str(data.get("last_decision_reason", "") or ""),
+    }
+
+
 def get_metrics(api_url: str) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
