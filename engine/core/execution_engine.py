@@ -111,8 +111,13 @@ class ExecutionEngine:
         order_type: str,
         price: float | None,
         post_only: bool,
+        extra_params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        params = {"postOnly": True} if post_only else {}
+        params: Dict[str, Any] = {}
+        if post_only:
+            params["postOnly"] = True
+        if extra_params:
+            params.update(extra_params)
         return self.exchange.create_order(
             symbol=symbol,
             type=order_type,
@@ -121,6 +126,52 @@ class ExecutionEngine:
             price=price if order_type == "limit" else None,
             params=params,
         )
+
+    @staticmethod
+    def _is_post_only_rejection(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return "postwouldexecute" in text or "orderimmediatelyfillable" in text
+
+    def _repriced_maker_limit(
+        self,
+        symbol: str,
+        side: str,
+        current_price: float | None,
+        step_bps: float = 3.0,
+    ) -> float | None:
+        if self.exchange is None:
+            return current_price
+
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+        except Exception as exc:
+            logger.warning("Failed to fetch ticker for maker reprice (%s): %s", symbol, exc)
+            return current_price
+
+        bid = float(ticker.get("bid") or 0.0)
+        ask = float(ticker.get("ask") or 0.0)
+        last = float(ticker.get("last") or 0.0)
+        offset = max(0.0001, float(step_bps) / 10_000.0)
+
+        if side == "buy":
+            reference = bid if bid > 0 else (last if last > 0 else current_price or 0.0)
+            if reference <= 0:
+                return current_price
+            candidate = reference * (1.0 - offset)
+            if current_price is not None:
+                candidate = min(candidate, current_price * (1.0 - offset))
+        else:
+            reference = ask if ask > 0 else (last if last > 0 else current_price or 0.0)
+            if reference <= 0:
+                return current_price
+            candidate = reference * (1.0 + offset)
+            if current_price is not None:
+                candidate = max(candidate, current_price * (1.0 + offset))
+
+        try:
+            return float(self.exchange.price_to_precision(symbol, candidate))
+        except Exception:
+            return float(candidate)
 
     def _fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         return self.exchange.fetch_order(order_id, symbol)
@@ -203,6 +254,18 @@ class ExecutionEngine:
             price = float(price) if price is not None else None
             expected_price = signal.get("expected_price")
             expected_price = float(expected_price) if expected_price is not None else None
+            strategy_id = str(signal.get("strategy_id", "")).lower()
+            regime = str(signal.get("regime", "")).lower()
+            reduce_only = bool(signal.get("reduce_only") or signal.get("reduceOnly"))
+            if regime == "risk_exit" or strategy_id.startswith("momentum_exit"):
+                reduce_only = True
+
+            order_params: Dict[str, Any] = {}
+            provided_params = signal.get("params")
+            if isinstance(provided_params, dict):
+                order_params.update(provided_params)
+            if reduce_only:
+                order_params["reduceOnly"] = True
 
             if self.paper_mode:
                 # Always resolve a concrete paper fill
@@ -258,22 +321,30 @@ class ExecutionEngine:
             # Futures exchanges (e.g., krakenfutures) expect contract units for amount.
             if market.get("contract"):
                 contract_size = float(market.get("contractSize") or 1.0)
+                if contract_size <= 0:
+                    contract_size = 1.0
+                inverse = bool(market.get("inverse"))
                 ref_price = price
-                if ref_price is None:
+
+                if inverse and ref_price is None:
                     ticker = self.exchange.fetch_ticker(exchange_symbol)
                     ref_price = float(ticker.get("last") or 0)
-                if ref_price <= 0:
-                    logger.error("Could not determine reference price for contract sizing")
+                if inverse and (ref_price is None or ref_price <= 0):
+                    logger.error("Could not determine reference price for inverse-contract sizing")
                     return None
 
-                contracts = max(1, int(round((amount * ref_price) / contract_size)))
+                if inverse:
+                    contracts = max(1, int(round((amount * float(ref_price)) / contract_size)))
+                else:
+                    contracts = max(1, int(round(amount / contract_size)))
                 logger.info(
-                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s)",
+                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s)",
                     amount,
                     contracts,
                     exchange_symbol,
                     contract_size,
                     ref_price,
+                    inverse,
                 )
                 amount = float(contracts)
 
@@ -300,14 +371,45 @@ class ExecutionEngine:
                 if remaining <= 0:
                     break
 
-                order = self._submit_order(
-                    symbol=exchange_symbol,
-                    side=side,
-                    amount=remaining,
-                    order_type=order_type,
-                    price=price,
-                    post_only=(order_kind == "maker"),
-                )
+                try:
+                    order = self._submit_order(
+                        symbol=exchange_symbol,
+                        side=side,
+                        amount=remaining,
+                        order_type=order_type,
+                        price=price,
+                        post_only=(order_kind == "maker"),
+                        extra_params=order_params,
+                    )
+                except Exception as exc:
+                    if order_kind == "maker" and self._is_post_only_rejection(exc):
+                        repriced = self._repriced_maker_limit(
+                            symbol=exchange_symbol,
+                            side=side,
+                            current_price=price,
+                        )
+                        logger.warning(
+                            "Maker order rejected as immediately fillable (attempt %s/%s): %s | old_price=%s new_price=%s",
+                            attempt,
+                            self.max_retries,
+                            exc,
+                            price,
+                            repriced,
+                        )
+                        if repriced is not None and (price is None or abs(repriced - price) > 1e-12):
+                            price = repriced
+                            time.sleep(self.retry_sleep_sec)
+                            continue
+
+                        final_status = OrderStatus.REJECTED.value
+                        last_order = {
+                            "id": None,
+                            "status": final_status,
+                            "reason": "post_only_would_execute",
+                            "error": str(exc),
+                        }
+                        break
+                    raise
                 last_order = order
 
                 logger.info(
@@ -405,7 +507,7 @@ class ExecutionEngine:
                 "filled": total_filled,
                 "avg_fill_price": avg_fill_price,
                 "price": avg_fill_price,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "metrics": metrics,
                 "raw": last_order,
             }

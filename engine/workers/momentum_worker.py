@@ -229,7 +229,10 @@ class MomentumWorker:
 
     @staticmethod
     def _symbol_key(value: str) -> str:
-        raw = "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+        text = str(value or "").upper().strip()
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        raw = "".join(ch for ch in text if ch.isalnum())
         if raw.startswith("PI"):
             raw = raw[2:]
         if raw.startswith("PF"):
@@ -242,7 +245,7 @@ class MomentumWorker:
         kb = cls._symbol_key(b)
         if not ka or not kb:
             return False
-        return ka == kb or ka in kb or kb in ka
+        return ka == kb
 
     @staticmethod
     def _extract_contract_size(row: dict[str, Any]) -> float:
@@ -258,21 +261,72 @@ class MomentumWorker:
         return size if size > 0 else 1.0
 
     @classmethod
-    def _contracts_to_base_quantity(cls, symbol: str, contracts: float, price: float, contract_size: float) -> float:
+    def _contracts_to_base_quantity(
+        cls,
+        symbol: str,
+        contracts: float,
+        price: float,
+        contract_size: float,
+        is_inverse: bool | None = None,
+    ) -> float:
         qty_contracts = abs(float(contracts))
         if qty_contracts <= 0:
             return 0.0
 
         size = contract_size if contract_size > 0 else 1.0
-        normalized_symbol = str(symbol or "").upper()
-        is_inverse_usd_contract = any(
-            token in normalized_symbol
-            for token in ("/USD:BTC", "/USD:XBT", "/USD:ETH", "/USD:SOL")
-        )
+        if is_inverse is None:
+            normalized_symbol = str(symbol or "").upper()
+            is_inverse = any(
+                token in normalized_symbol
+                for token in ("/USD:BTC", "/USD:XBT", "/USD:ETH", "/USD:SOL")
+            )
 
-        if is_inverse_usd_contract and price > 0:
+        if is_inverse and price > 0:
             return (qty_contracts * size) / price
         return qty_contracts * size
+
+    def _is_inverse_contract(self, symbol: str, row: dict[str, Any]) -> bool:
+        inverse = row.get("inverse")
+        if isinstance(inverse, bool):
+            return inverse
+
+        exchange = getattr(self.execution_engine, "exchange", None)
+        market_symbol = str(row.get("symbol") or "").strip()
+        candidates = [market_symbol, symbol]
+
+        info = row.get("info")
+        if isinstance(info, dict):
+            info_symbol = str(info.get("symbol") or "").strip()
+            if info_symbol:
+                candidates.append(info_symbol)
+
+        if exchange is not None:
+            markets_by_id = getattr(exchange, "markets_by_id", None) or {}
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                market = None
+                try:
+                    market = exchange.market(candidate)
+                except Exception:
+                    market = None
+
+                if market is None:
+                    by_id = (
+                        markets_by_id.get(candidate)
+                        or markets_by_id.get(str(candidate).upper())
+                        or markets_by_id.get(str(candidate).lower())
+                    )
+                    if isinstance(by_id, list):
+                        by_id = by_id[0] if by_id else None
+                    if isinstance(by_id, dict):
+                        market = by_id
+
+                if isinstance(market, dict) and market.get("inverse") is not None:
+                    return bool(market.get("inverse"))
+
+        normalized_symbol = str(symbol or "").upper()
+        return any(token in normalized_symbol for token in ("/USD:BTC", "/USD:XBT", "/USD:ETH", "/USD:SOL"))
 
     @staticmethod
     def _parse_timestamp_seconds(row: dict[str, Any]) -> float | None:
@@ -404,7 +458,7 @@ class MomentumWorker:
         vol = pd.to_numeric(df["volume"], errors="coerce")
         ret = close.pct_change()
         vol_ret = vol.pct_change()
-        data = pd.concat([ret, vol_ret], axis=1).dropna().tail(window)
+        data = pd.concat([ret, vol_ret], axis=1).replace([float("inf"), float("-inf")], float("nan")).dropna().tail(window)
         if data.empty:
             return 0.0
         corr = data.iloc[:, 0].corr(data.iloc[:, 1])
@@ -438,7 +492,8 @@ class MomentumWorker:
 
         candle_df = candles.copy()
         if {"open", "close", "high", "low"}.issubset(candle_df.columns):
-            rng = (high - low).replace(0.0, pd.NA).fillna(1e-9)
+            rng = (high - low).astype("float64")
+            rng = rng.mask(rng == 0.0, 1e-9).fillna(1e-9)
             bullish_body = ((close - open_).clip(lower=0.0) / rng).tail(5).mean()
             bearish_body = ((open_ - close).clip(lower=0.0) / rng).tail(5).mean()
             bullish_body = float(0.0 if pd.isna(bullish_body) else bullish_body)
@@ -1102,9 +1157,18 @@ class MomentumWorker:
             contracts = self._safe_float(row.get("contracts"), 0.0)
             if contracts == 0:
                 continue
-            symbol = str(row.get("id") or row.get("symbol") or self.symbol)
+            info = row.get("info")
+            info_symbol = ""
+            if isinstance(info, dict):
+                info_symbol = str(info.get("symbol") or "").strip()
+            symbol = str(row.get("id") or info_symbol or row.get("symbol") or self.symbol)
             side_raw = str(row.get("side") or "").lower()
-            side = "buy" if side_raw in {"buy", "long"} or contracts > 0 else "sell"
+            if side_raw in {"buy", "long"}:
+                side = "buy"
+            elif side_raw in {"sell", "short"}:
+                side = "sell"
+            else:
+                side = "buy" if contracts > 0 else "sell"
             entry_price = self._safe_float(row.get("entryPrice"), 0.0)
             mark_price = self._safe_float(row.get("markPrice"), entry_price)
             if mark_price <= 0:
@@ -1112,11 +1176,13 @@ class MomentumWorker:
             if entry_price <= 0:
                 entry_price = mark_price
             contract_size = self._extract_contract_size(row)
+            is_inverse = self._is_inverse_contract(symbol=symbol, row=row)
             quantity = self._contracts_to_base_quantity(
                 symbol=symbol,
                 contracts=contracts,
                 price=mark_price if mark_price > 0 else entry_price,
                 contract_size=contract_size,
+                is_inverse=is_inverse,
             )
             if quantity <= 0:
                 quantity = abs(contracts)
@@ -1173,9 +1239,18 @@ class MomentumWorker:
                 )
             else:
                 local_pos = self.risk_manager.positions[local_symbol]
+                prev_quantity = self._safe_float(local_pos.get("quantity"), 0.0)
                 local_pos["side"] = row["side"]
                 local_pos["quantity"] = float(row["quantity"])
                 local_pos["entry_price"] = float(row["entry_price"])
+                if prev_quantity > 0 and float(row["quantity"]) > (prev_quantity * 10.0):
+                    logger.warning(
+                        "Synced position quantity jump | symbol=%s prev=%.8f new=%.8f contracts=%s",
+                        local_symbol,
+                        prev_quantity,
+                        float(row["quantity"]),
+                        row.get("contracts"),
+                    )
                 self._ensure_position_guard(
                     symbol=local_symbol,
                     side=str(row["side"]),
