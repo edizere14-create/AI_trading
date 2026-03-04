@@ -132,6 +132,11 @@ class ExecutionEngine:
         text = str(exc or "").lower()
         return "postwouldexecute" in text or "orderimmediatelyfillable" in text
 
+    @staticmethod
+    def _is_would_not_reduce_position(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return "wouldnotreduceposition" in text
+
     def _repriced_maker_limit(
         self,
         symbol: str,
@@ -406,6 +411,21 @@ class ExecutionEngine:
                             "id": None,
                             "status": final_status,
                             "reason": "post_only_would_execute",
+                            "error": str(exc),
+                        }
+                        break
+                    if reduce_only and self._is_would_not_reduce_position(exc):
+                        logger.warning(
+                            "Reduce-only order would not reduce position; treating as no-op | symbol=%s side=%s amount=%s",
+                            exchange_symbol,
+                            side,
+                            remaining,
+                        )
+                        final_status = OrderStatus.CANCELLED.value
+                        last_order = {
+                            "id": None,
+                            "status": final_status,
+                            "reason": "would_not_reduce_position",
                             "error": str(exc),
                         }
                         break

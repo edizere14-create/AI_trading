@@ -42,6 +42,13 @@ class _DummyExchange:
         return {"id": order_id}
 
 
+class _WouldNotReduceExchange(_DummyExchange):
+    def create_order(self, symbol: str, type: str, side: str, amount: float, price=None, params=None):
+        self._last_amount = float(amount)
+        self.last_params = dict(params or {})
+        raise Exception("krakenfutures: createOrder failed due to wouldNotReducePosition")
+
+
 def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
@@ -68,6 +75,34 @@ def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
     assert result is not None
     assert engine.exchange.last_params.get("reduceOnly") is True
     assert engine.exchange._last_amount == pytest.approx(50.0)
+
+
+def test_reduce_only_would_not_reduce_is_treated_as_cancelled() -> None:
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _WouldNotReduceExchange()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "quantity": 0.001,
+            "order_kind": "taker",
+            "strategy_id": "momentum_exit_v1",
+            "regime": "risk_exit",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "cancelled"
+    assert (result.get("raw") or {}).get("reason") == "would_not_reduce_position"
 
 
 def test_symbol_matching_is_strict_after_normalization() -> None:
