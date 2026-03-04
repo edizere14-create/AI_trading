@@ -10,6 +10,7 @@ from app.ui.data_client import (
     ApiContractError,
     get_risk_preview,
     get_active_trades,
+    get_open_orders,
     get_ai_insight,
     get_backtest,
     get_candles,
@@ -324,8 +325,20 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
         trades = get_active_trades(api_url)
         candles = get_candles(api_url, limit=300)
     except ApiContractError as e:
-        st.error(str(e))
-        st.stop()
+        st.error(f"Dashboard data load failed: {e}")
+        st.info("Switch to Backend API mode, or verify All-in-One credentials/connectivity.")
+        return
+    except Exception as exc:
+        st.error(f"Dashboard runtime error: {exc}")
+        st.info("Switch to Backend API mode, or verify All-in-One exchange/data configuration.")
+        return
+
+    try:
+        open_orders = get_open_orders(api_url)
+    except ApiContractError:
+        open_orders = pd.DataFrame()
+    except Exception:
+        open_orders = pd.DataFrame()
 
     _metric_bar(metrics)
 
@@ -528,6 +541,12 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
             st.info("No active trades.")
         else:
             st.dataframe(trades, use_container_width=True, hide_index=True)
+
+        st.subheader("Open Orders")
+        if open_orders.empty:
+            st.info("No open orders.")
+        else:
+            st.dataframe(open_orders, use_container_width=True, hide_index=True)
 
 
 def render_portfolio(api_url: str) -> None:

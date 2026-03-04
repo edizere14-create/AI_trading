@@ -442,6 +442,102 @@ def get_active_trades(api_url: str) -> pd.DataFrame:
     return pd.concat([api_df, paper_df], ignore_index=True)
 
 
+def get_open_orders(api_url: str, limit: int = 100) -> pd.DataFrame:
+    if _all_in_one_enabled(api_url):
+        exchange = _build_exchange()
+        symbol = _kraken_symbol()
+        try:
+            orders = exchange.fetch_open_orders(symbol)
+        except Exception:
+            try:
+                orders = exchange.fetch_open_orders()
+            except Exception as exc:
+                raise _format_kraken_exchange_error("fetch Kraken open orders", exc) from exc
+
+        rows: list[dict[str, Any]] = []
+        for order in orders or []:
+            if not isinstance(order, dict):
+                continue
+            side = str(order.get("side") or "").lower()
+            if side not in {"buy", "sell"}:
+                continue
+
+            contracts = _safe_float(order.get("remaining"))
+            if contracts is None or contracts <= 0:
+                contracts = _safe_float(order.get("amount"))
+            if contracts is None or contracts <= 0:
+                continue
+
+            price = float(order.get("price") or order.get("average") or 0.0)
+            symbol_val = str(order.get("symbol") or order.get("id") or "")
+            contract_size = _extract_contract_size(order)
+            quantity = _contracts_to_display_quantity(symbol_val, contracts, price, contract_size)
+            if quantity <= 0:
+                quantity = abs(float(contracts))
+
+            rows.append(
+                {
+                    "order_id": str(order.get("id") or ""),
+                    "symbol": symbol_val,
+                    "side": side,
+                    "quantity": quantity,
+                    "contracts": abs(float(contracts)),
+                    "price": price,
+                    "status": str(order.get("status") or "open").lower(),
+                    "timestamp": order.get("datetime") or order.get("timestamp"),
+                    "source": "exchange",
+                }
+            )
+        return pd.DataFrame(rows)
+
+    try:
+        payload = _get_json(f"{api_url}/momentum/orders-sync", params={"limit": int(limit)})
+    except ApiContractError:
+        return pd.DataFrame()
+
+    if not isinstance(payload, dict):
+        return pd.DataFrame()
+
+    orders = payload.get("orders", [])
+    if not isinstance(orders, list):
+        return pd.DataFrame()
+
+    open_statuses = {"open", "new", "pending", "submitted"}
+    rows: list[dict[str, Any]] = []
+    for row in orders:
+        if not isinstance(row, dict):
+            continue
+        progress = str(row.get("progress_state") or "").lower()
+        exchange_status = str(row.get("exchange_status") or "").lower()
+        if progress not in {"open", "partially_filled_open"} and exchange_status not in open_statuses:
+            continue
+
+        amount = _safe_float(row.get("amount")) or 0.0
+        remaining = _safe_float(row.get("remaining_quantity")) or 0.0
+        filled = _safe_float(row.get("filled_quantity")) or 0.0
+        qty = remaining if remaining > 0 else max(0.0, amount - filled)
+        if qty <= 0:
+            qty = amount
+        if qty <= 0:
+            continue
+
+        rows.append(
+            {
+                "order_id": str(row.get("order_id") or ""),
+                "symbol": str(row.get("symbol") or ""),
+                "side": str(row.get("side") or "").lower(),
+                "quantity": float(qty),
+                "contracts": float(qty),
+                "price": None,
+                "status": exchange_status or progress or "open",
+                "timestamp": row.get("timestamp"),
+                "source": "orders-sync",
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
