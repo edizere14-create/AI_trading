@@ -138,3 +138,49 @@ def test_metrics_use_backfilled_unrealized_when_risk_status_is_zero(monkeypatch)
     metrics = data_client.get_metrics("http://127.0.0.1:8000")
     assert metrics["daily_pnl"] == -20.0
     assert metrics["risk_exposure"] == 18.0
+
+
+def test_all_in_one_active_trades_backfill_mark_with_ticker(monkeypatch) -> None:
+    class _FakeExchange:
+        def fetch_positions(self):
+            return [
+                {
+                    "symbol": "BTC/USD:USD",
+                    "side": "long",
+                    "contracts": 2.0,
+                    "entryPrice": 100.0,
+                }
+            ]
+
+        def fetch_ticker(self, symbol: str):
+            return {"last": 90.0}
+
+    monkeypatch.setattr(data_client, "_build_exchange", lambda: _FakeExchange())
+    monkeypatch.setattr(data_client, "_all_in_one_enabled", lambda _: True)
+    monkeypatch.setattr(data_client, "_contracts_to_display_quantity", lambda symbol, contracts, price, contract_size: abs(float(contracts)))
+
+    trades = data_client.get_active_trades("all-in-one")
+
+    assert not trades.empty
+    assert float(trades.loc[0, "current_price"]) == 90.0
+    assert float(trades.loc[0, "unrealized_pnl"]) == -20.0
+
+
+def test_portfolio_computes_weight_pct_from_active_trades(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_client,
+        "get_active_trades",
+        lambda _: pd.DataFrame(
+            [
+                {"symbol": "A", "quantity": 1.0, "current_price": 100.0},
+                {"symbol": "B", "quantity": 1.0, "current_price": 300.0},
+            ]
+        ),
+    )
+
+    pf = data_client.get_portfolio("http://127.0.0.1:8000")
+
+    assert not pf.empty
+    weights = pf.set_index("symbol")["weight_pct"].to_dict()
+    assert weights["A"] == 25.0
+    assert weights["B"] == 75.0

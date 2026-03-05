@@ -580,6 +580,50 @@ def get_active_trades(api_url: str) -> pd.DataFrame:
         except Exception as exc:
             raise _format_kraken_exchange_error("fetch Kraken positions", exc) from exc
 
+        ticker_cache: dict[str, float] = {}
+
+        def _extract_mark_price(position: dict[str, Any], symbol: str, entry: float) -> float:
+            candidates: list[Any] = [
+                position.get("markPrice"),
+                position.get("mark_price"),
+                position.get("mark"),
+                position.get("lastPrice"),
+                position.get("last"),
+                position.get("indexPrice"),
+            ]
+            info = position.get("info")
+            if isinstance(info, dict):
+                candidates.extend(
+                    [
+                        info.get("markPrice"),
+                        info.get("mark_price"),
+                        info.get("mark"),
+                        info.get("last"),
+                        info.get("indexPrice"),
+                        info.get("price"),
+                    ]
+                )
+
+            for candidate in candidates:
+                value = _safe_float(candidate)
+                if isinstance(value, float) and value > 0:
+                    return value
+
+            if symbol:
+                cached = ticker_cache.get(symbol)
+                if isinstance(cached, float) and cached > 0:
+                    return cached
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    last = _safe_float((ticker or {}).get("last"))
+                    if isinstance(last, float) and last > 0:
+                        ticker_cache[symbol] = last
+                        return last
+                except Exception:
+                    pass
+
+            return entry if entry > 0 else 0.0
+
         rows: list[dict[str, Any]] = []
         for p in positions or []:
             contracts = float(p.get("contracts") or 0.0)
@@ -587,22 +631,40 @@ def get_active_trades(api_url: str) -> pd.DataFrame:
                 continue
             symbol = str(p.get("symbol") or p.get("id") or "")
             side = str(p.get("side") or "").lower() or ("buy" if contracts > 0 else "sell")
-            entry = float(p.get("entryPrice") or p.get("markPrice") or 0.0)
-            mark = float(p.get("markPrice") or entry)
+            entry = float(
+                p.get("entryPrice")
+                or p.get("entry_price")
+                or ((p.get("info") or {}).get("entryPrice") if isinstance(p.get("info"), dict) else 0.0)
+                or 0.0
+            )
+            mark = float(_extract_mark_price(p, symbol, entry))
+            if entry <= 0 and mark > 0:
+                entry = mark
             contract_size = _extract_contract_size(p)
             quantity = _contracts_to_display_quantity(symbol, contracts, mark or entry, contract_size)
             if quantity <= 0:
                 quantity = abs(contracts)
             notional = (quantity * mark) if mark > 0 else abs(contracts) * contract_size
+            side_norm = "buy" if side in {"long", "buy"} else "sell"
+            unrealized = _safe_float(p.get("unrealizedPnl"))
+            if unrealized is None:
+                unrealized = _safe_float(p.get("unrealized_pnl"))
+            if unrealized is None:
+                unrealized = _safe_float((p.get("info") or {}).get("unrealizedPnl") if isinstance(p.get("info"), dict) else None)
+            if unrealized is None:
+                unrealized = 0.0
+            if abs(float(unrealized)) < 1e-9 and entry > 0 and mark > 0 and quantity > 0:
+                unrealized = ((mark - entry) * quantity) if side_norm == "buy" else ((entry - mark) * quantity)
+
             rows.append(
                 {
                     "symbol": symbol,
-                    "side": "buy" if side in {"long", "buy"} else "sell",
+                    "side": side_norm,
                     "quantity": quantity,
                     "contracts": abs(contracts),
                     "entry_price": entry,
                     "current_price": mark,
-                    "unrealized_pnl": float(p.get("unrealizedPnl") or 0.0),
+                    "unrealized_pnl": float(unrealized),
                     "notional": notional,
                     "leverage": float(p.get("leverage") or 0.0),
                     "source": "exchange",
@@ -777,28 +839,20 @@ def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
 
 
 def get_portfolio(api_url: str) -> pd.DataFrame:
-    if _all_in_one_enabled(api_url):
-        trades = get_active_trades(api_url)
-        if trades.empty:
-            return trades
-        trades = trades.copy()
-        if "notional" in trades.columns:
-            trades["notional"] = pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0)
-        else:
-            trades["notional"] = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
-                trades["current_price"], errors="coerce"
-            ).fillna(0.0)
-        total = float(trades["notional"].sum())
-        trades["weight_pct"] = (trades["notional"] / total * 100.0) if total > 0 else 0.0
+    trades = get_active_trades(api_url)
+    if trades.empty:
         return trades
 
-    # Exact backend route replacing removed /risk/portfolio
-    data = _get_json(f"{api_url}/risk/positions")
-    if isinstance(data, dict):
-        data = data.get("positions", [])
-    if not isinstance(data, list):
-        raise ApiContractError("Contract mismatch: /risk/positions must return list or {'positions': list}.")
-    return pd.DataFrame(data)
+    trades = trades.copy()
+    if "notional" in trades.columns:
+        trades["notional"] = pd.to_numeric(trades["notional"], errors="coerce").fillna(0.0)
+    else:
+        trades["notional"] = pd.to_numeric(trades["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(
+            trades["current_price"], errors="coerce"
+        ).fillna(0.0)
+    total = float(trades["notional"].sum())
+    trades["weight_pct"] = (trades["notional"] / total * 100.0) if total > 0 else 0.0
+    return trades
 
 
 def get_backtest(api_url: str, lookback_days: int = 90) -> dict[str, Any]:
