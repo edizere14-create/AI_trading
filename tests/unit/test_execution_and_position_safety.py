@@ -88,6 +88,48 @@ class _MinimalExecutionEngine:
         self.paper_mode = paper_mode
 
 
+def test_execution_engine_sandbox_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KRAKEN_SANDBOX", "true")
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+    )
+    assert engine.sandbox is True
+
+    monkeypatch.setenv("KRAKEN_SANDBOX", "false")
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+    )
+    assert engine.sandbox is False
+
+
+def test_execution_engine_explicit_sandbox_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KRAKEN_SANDBOX", "true")
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=False,
+    )
+    assert engine.sandbox is False
+
+    monkeypatch.setenv("KRAKEN_SANDBOX", "false")
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    assert engine.sandbox is True
+
+
 def test_risk_exit_orders_are_reduce_only_for_futures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
     monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100.0")

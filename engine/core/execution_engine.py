@@ -35,13 +35,13 @@ class ExecutionEngine:
         api_key: str,
         api_secret: str,
         paper_mode: bool = True,
-        sandbox: bool = False,
+        sandbox: bool | None = None,
     ):
         self.exchange_id = exchange_id
         self.api_key = api_key
         self.api_secret = api_secret
         self.paper_mode = paper_mode
-        self.sandbox = sandbox
+        self.sandbox = self._resolve_sandbox_mode(sandbox)
         self.exchange: ccxt.Exchange | None = None
         self.max_retries = 3
         self.retry_sleep_sec = 0.5
@@ -77,6 +77,22 @@ class ExecutionEngine:
             self.exchange_id,
             self.sandbox,
         )
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _resolve_sandbox_mode(cls, explicit: bool | None) -> bool:
+        if explicit is not None:
+            return bool(explicit)
+        raw = os.getenv("KRAKEN_SANDBOX")
+        if raw is not None:
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return cls._env_bool("KRAKEN_FUTURES_DEMO", True)
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
