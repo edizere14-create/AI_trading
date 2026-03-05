@@ -96,7 +96,7 @@ class MomentumWorker:
         else:
              # Fallback if not provided
             paper_mode = self._env_bool("TRADING_PAPER_MODE", True)
-            sandbox_mode = self._env_bool("KRAKEN_FUTURES_DEMO", True)
+            sandbox_mode = self._sandbox_mode_from_env(True)
             self.execution_engine = ExecutionEngine(
                 exchange_id="krakenfutures",
                 api_key=os.environ.get("KRAKEN_API_KEY", ""),
@@ -327,6 +327,13 @@ class MomentumWorker:
         if raw is None:
             return default
         return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _sandbox_mode_from_env(cls, default: bool = True) -> bool:
+        raw = os.environ.get("KRAKEN_SANDBOX")
+        if raw is not None:
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return cls._env_bool("KRAKEN_FUTURES_DEMO", default)
 
     @staticmethod
     def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -2065,7 +2072,7 @@ class MomentumWorker:
                     "timeout": 30000,
                 }
             )
-            demo = os.environ.get("KRAKEN_FUTURES_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
+            demo = self._sandbox_mode_from_env(True)
             exchange.set_sandbox_mode(demo)
 
             ccxt_symbol = _to_ccxt_symbol(symbol)

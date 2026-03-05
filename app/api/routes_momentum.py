@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 import pandas as pd
+from app.services.startup_safety import startup_safety_check
 
 router = APIRouter(prefix="/momentum", tags=["momentum"])
 logger = logging.getLogger(__name__)
@@ -27,6 +28,13 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sandbox_mode_from_env(default: bool = True) -> bool:
+    raw = os.getenv("KRAKEN_SANDBOX")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return _env_bool("KRAKEN_FUTURES_DEMO", default)
 
 
 def _fallback_analytics(reason: str = "Waiting for market data...") -> dict[str, Any]:
@@ -359,7 +367,7 @@ def _build_momentum_worker(symbol: str):
     from engine.workers.momentum_worker import MomentumWorker
 
     paper_mode = _env_bool("TRADING_PAPER_MODE", True)
-    sandbox_mode = _env_bool("KRAKEN_FUTURES_DEMO", True)
+    sandbox_mode = _sandbox_mode_from_env(True)
 
     execution_engine = ExecutionEngine(
         exchange_id="krakenfutures",
@@ -406,6 +414,21 @@ async def start_momentum(symbol: str | None = None) -> dict[str, Any]:
 
     if momentum_task and not momentum_task.done():
         return {"status": "already_running", "symbol": getattr(momentum_worker, "symbol", fallback_symbol)}
+
+    try:
+        await startup_safety_check(
+            execution_engine=getattr(momentum_worker, "execution_engine", None),
+            risk_manager=getattr(momentum_worker, "risk_manager", None),
+            momentum_worker=momentum_worker,
+            logger=logger,
+        )
+    except RuntimeError as exc:
+        startup_error = str(exc)
+        return {
+            "status": "blocked",
+            "reason": startup_error,
+            "symbol": getattr(momentum_worker, "symbol", fallback_symbol),
+        }
 
     if hasattr(momentum_worker, "start"):
         momentum_task = asyncio.create_task(momentum_worker.start())

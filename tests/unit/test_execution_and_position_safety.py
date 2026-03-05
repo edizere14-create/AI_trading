@@ -282,6 +282,58 @@ def test_leverage_guard_blocks_excessive_notional(monkeypatch: pytest.MonkeyPatc
     assert engine.exchange._last_amount == pytest.approx(0.0)
 
 
+def test_convert_and_validate_contracts_skips_guards_for_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "1")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "1.0")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    contracts, raw, notional, leverage = engine._convert_and_validate_contracts(
+        base_qty=2.6614,
+        contract_size=1.0,
+        equity=5497.0,
+        mark_price=81700.0,
+        symbol="BTC/USD:USD",
+        inverse=False,
+        is_exit=True,
+        reduce_only=True,
+    )
+
+    assert contracts >= 1
+    assert raw > 0
+    assert notional > 0
+    assert leverage > 1.0
+
+
+def test_convert_and_validate_contracts_blocks_entry_on_high_leverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "1.0")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    with pytest.raises(ValueError, match="Leverage guard triggered"):
+        engine._convert_and_validate_contracts(
+            base_qty=2.6614,
+            contract_size=1.0,
+            equity=5497.0,
+            mark_price=81700.0,
+            symbol="BTC/USD:USD",
+            inverse=False,
+            is_exit=False,
+            reduce_only=False,
+        )
+
+
 def test_execution_honors_risk_manager_pre_trade_block(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
     monkeypatch.setenv("MAX_LEVERAGE_RATIO", "50.0")

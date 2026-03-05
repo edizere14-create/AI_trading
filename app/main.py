@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.config import settings
 from app.core import logging_config
 from app.services.websocket_service import ConnectionManager
+from app.services.startup_safety import startup_safety_check
 from app.strategy_manager import StrategyManager
 from app.brokers.kraken import KrakenBroker
 from app.utils.ai_models import TradingAIModels
@@ -45,6 +46,13 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sandbox_mode_from_env(default: bool = True) -> bool:
+    sandbox_raw = os.getenv("KRAKEN_SANDBOX")
+    if sandbox_raw is not None:
+        return sandbox_raw.strip().lower() in {"1", "true", "yes", "on"}
+    return _env_bool("KRAKEN_FUTURES_DEMO", default)
 
 # Initialize Kraken broker
 kraken_broker = KrakenBroker(
@@ -161,7 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from engine.workers.momentum_worker import MomentumWorker
 
         paper_mode = _env_bool("TRADING_PAPER_MODE", True)
-        sandbox_mode = _env_bool("KRAKEN_FUTURES_DEMO", True)
+        sandbox_mode = _sandbox_mode_from_env(True)
         api_key = os.getenv("KRAKEN_API_KEY", "")
         api_secret = os.getenv("KRAKEN_API_SECRET", "")
         if not paper_mode and (not api_key or not api_secret):
@@ -198,7 +206,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         routes_momentum.startup_error = None
         logger.info("Momentum worker initialized")
 
-        if os.getenv("MOMENTUM_AUTO_START", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            await startup_safety_check(
+                execution_engine=execution_engine,
+                risk_manager=getattr(momentum_worker, "risk_manager", None),
+                momentum_worker=momentum_worker,
+                logger=logger,
+            )
+        except RuntimeError as exc:
+            routes_momentum.startup_error = str(exc)
+            logger.critical("[MAIN] STARTUP SAFETY ABORTED: %s", exc)
+            setattr(momentum_worker, "enabled", False)
+
+        can_auto_start = not bool(routes_momentum.startup_error)
+        if can_auto_start and os.getenv("MOMENTUM_AUTO_START", "false").strip().lower() in {"1", "true", "yes", "on"}:
             momentum_task = asyncio.create_task(momentum_worker.start())
             routes_momentum.momentum_task = momentum_task
             logger.info("Momentum worker auto-started")

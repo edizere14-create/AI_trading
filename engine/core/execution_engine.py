@@ -132,19 +132,44 @@ class ExecutionEngine:
         mark_price: float,
         symbol: str,
         inverse: bool,
+        is_exit: bool = False,
+        reduce_only: bool = False,
     ) -> tuple[int, float, float, float]:
         if contract_size <= 0:
             contract_size = 1.0
         if mark_price <= 0:
             raise ValueError("mark price must be positive for contract conversion")
-        if equity is None or equity <= 0:
-            raise ValueError("missing positive equity for leverage guard")
 
         if inverse:
             raw_contracts = (base_qty * mark_price) / contract_size
         else:
             raw_contracts = base_qty / contract_size
         intended_contracts = max(1, int(round(raw_contracts)))
+
+        notional = (
+            intended_contracts * contract_size
+            if inverse
+            else intended_contracts * contract_size * mark_price
+        )
+        leverage = (
+            (notional / float(equity))
+            if equity is not None and float(equity) > 0
+            else float("inf")
+        )
+
+        # Never block risk-reducing exits; only apply hard guards to entries.
+        if is_exit or reduce_only:
+            logger.info(
+                "[SIZE OK - EXIT] symbol=%s contracts=%s notional=%.2f leverage=%.2fx - leverage guard skipped (reduce_only exit)",
+                symbol,
+                intended_contracts,
+                notional,
+                leverage,
+            )
+            return intended_contracts, raw_contracts, notional, leverage
+
+        if equity is None or equity <= 0:
+            raise ValueError("missing positive equity for leverage guard")
 
         if intended_contracts > self.max_contracts_hard_limit:
             logger.error(
@@ -161,12 +186,6 @@ class ExecutionEngine:
                 f"Contract size inflation guard triggered: {intended_contracts} contracts exceeds hard limit {self.max_contracts_hard_limit}"
             )
 
-        # Inverse contracts are quoted in USD notional per contract; linear contracts use contract_size * price.
-        notional = (
-            intended_contracts * contract_size
-            if inverse
-            else intended_contracts * contract_size * mark_price
-        )
         leverage = notional / equity
         if leverage > self.max_leverage_ratio:
             logger.error(
@@ -200,6 +219,244 @@ class ExecutionEngine:
             symbol,
         )
         return intended_contracts, raw_contracts, notional, leverage
+
+    def _is_exit_signal(
+        self,
+        signal: Dict[str, Any],
+        *,
+        strategy_id: str,
+        regime: str,
+        reduce_only: bool,
+    ) -> bool:
+        if bool(signal.get("is_exit")):
+            return True
+        if reduce_only:
+            return True
+        return regime == "risk_exit" or strategy_id.startswith("momentum_exit")
+
+    @staticmethod
+    def _normalize_position_side(side: str) -> str:
+        raw = str(side or "").strip().lower()
+        if raw in {"long", "buy"}:
+            return "buy"
+        if raw in {"short", "sell"}:
+            return "sell"
+        return "buy"
+
+    def _contracts_to_base_quantity(
+        self,
+        contracts: float,
+        contract_size: float,
+        mark_price: float,
+        inverse: bool,
+    ) -> float:
+        qty_contracts = abs(float(contracts))
+        size = max(1e-12, float(contract_size))
+        px = max(0.0, float(mark_price))
+        if inverse and px > 0:
+            return (qty_contracts * size) / px
+        return qty_contracts * size
+
+    def get_contract_size(self, symbol: str) -> float:
+        if self.exchange is None:
+            return 1.0
+        try:
+            exchange_symbol = self._resolve_exchange_symbol(symbol)
+            market = self.exchange.market(exchange_symbol)
+            size = float(market.get("contractSize") or 1.0)
+            return size if size > 0 else 1.0
+        except Exception:
+            return 1.0
+
+    def _is_inverse_market(self, symbol: str) -> bool:
+        if self.exchange is None:
+            return False
+        try:
+            exchange_symbol = self._resolve_exchange_symbol(symbol)
+            market = self.exchange.market(exchange_symbol)
+            return bool(market.get("inverse"))
+        except Exception:
+            return False
+
+    def get_mark_price(self, symbol: str) -> float | None:
+        if self.exchange is None:
+            return None
+        try:
+            exchange_symbol = self._resolve_exchange_symbol(symbol)
+            ticker = self.exchange.fetch_ticker(exchange_symbol)
+            for key in ("mark", "last", "close", "index"):
+                val = self._to_float(ticker.get(key))
+                if val is not None and val > 0:
+                    return val
+        except Exception:
+            return None
+        return None
+
+    async def get_mark_price_async(self, symbol: str) -> float | None:
+        return await asyncio.to_thread(self.get_mark_price, symbol)
+
+    def get_open_positions(self) -> list[Dict[str, Any]]:
+        if self.paper_mode or self.exchange is None:
+            return []
+
+        try:
+            rows = self.exchange.fetch_positions()
+        except Exception as exc:
+            logger.warning("Could not fetch open positions: %s", exc)
+            return []
+
+        out: list[Dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            info = row.get("info") if isinstance(row.get("info"), dict) else {}
+            contracts_val = self._to_float(row.get("contracts"))
+            if contracts_val is None:
+                contracts_val = self._to_float(info.get("size")) if isinstance(info, dict) else None
+            contracts = abs(float(contracts_val or 0.0))
+            if contracts <= 0:
+                continue
+
+            symbol_val = str(row.get("symbol") or row.get("id") or "").strip()
+            if not symbol_val:
+                continue
+
+            side = self._normalize_position_side(str(row.get("side") or (info.get("side") if isinstance(info, dict) else "") or "buy"))
+            mark_price = self._to_float(row.get("markPrice"))
+            if mark_price is None and isinstance(info, dict):
+                mark_price = self._to_float(info.get("markPrice"))
+            if mark_price is None or mark_price <= 0:
+                mark_price = self.get_mark_price(symbol_val)
+
+            contract_size = self.get_contract_size(symbol_val)
+            inverse = self._is_inverse_market(symbol_val)
+            out.append(
+                {
+                    "symbol": symbol_val,
+                    "contracts": contracts,
+                    "side": side,
+                    "mark_price": mark_price,
+                    "contract_size": contract_size,
+                    "inverse": inverse,
+                }
+            )
+        return out
+
+    async def get_open_positions_async(self) -> list[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_open_positions)
+
+    def emergency_exit_position(
+        self,
+        *,
+        symbol: str,
+        current_contracts: float,
+        side: str,
+        mark_price: float | None,
+        equity: float | None = None,
+        reason: str = "emergency_exit",
+        is_exit: bool = True,
+    ) -> Dict[str, Any]:
+        if current_contracts <= 0:
+            logger.warning("[EXIT] No contracts to exit | symbol=%s", symbol)
+            return {"status": "no_position", "symbol": symbol}
+
+        exit_side = "sell" if self._normalize_position_side(side) == "buy" else "buy"
+        chunk_size = max(1, int(os.getenv("EXIT_CHUNK_SIZE", "1") or "1"))
+        delay_secs = max(0.0, float(os.getenv("EXIT_CHUNK_DELAY_SECS", "0.5") or "0.5"))
+        remaining = int(max(1, round(float(current_contracts))))
+        chunks: list[int] = []
+        while remaining > 0:
+            chunk = min(remaining, chunk_size)
+            chunks.append(chunk)
+            remaining -= chunk
+
+        logger.warning(
+            "[EXIT] Initiating | symbol=%s side=%s total=%s chunks=%s reason=%s",
+            symbol,
+            exit_side,
+            current_contracts,
+            len(chunks),
+            reason,
+        )
+
+        results: list[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            try:
+                contract_size = self.get_contract_size(symbol)
+                inverse = self._is_inverse_market(symbol)
+                px = float(mark_price or 0.0) or float(self.get_mark_price(symbol) or 0.0)
+                if px <= 0:
+                    raise ValueError("missing mark price for emergency exit")
+
+                base_qty = self._contracts_to_base_quantity(
+                    contracts=float(chunk),
+                    contract_size=contract_size,
+                    mark_price=px,
+                    inverse=inverse,
+                )
+
+                signal = {
+                    "symbol": symbol,
+                    "side": exit_side,
+                    "quantity": float(base_qty),
+                    "order_type": "market",
+                    "order_kind": "taker",
+                    "reduce_only": True,
+                    "is_exit": bool(is_exit),
+                    "regime": "risk_exit",
+                    "strategy_id": "emergency_exit_v1",
+                    "exit_reason": reason,
+                    "expected_price": px,
+                }
+                if equity is not None:
+                    signal["equity"] = float(equity)
+
+                result = self.execute(signal)
+                status = str((result or {}).get("status", "")).lower()
+                if (not result) or status in {"rejected", "blocked"}:
+                    raise RuntimeError((result or {}).get("error") or (result or {}).get("reason") or status or "exit_failed")
+
+                logger.info(
+                    "[EXIT] Chunk %s/%s sent | contracts=%s result_status=%s",
+                    idx,
+                    len(chunks),
+                    chunk,
+                    status or "unknown",
+                )
+                results.append({"chunk": idx, "contracts": chunk, "result": result})
+            except Exception as exc:
+                logger.error(
+                    "[EXIT] Chunk %s/%s FAILED | contracts=%s error=%s",
+                    idx,
+                    len(chunks),
+                    chunk,
+                    exc,
+                )
+                results.append({"chunk": idx, "contracts": chunk, "error": str(exc)})
+
+            if idx < len(chunks) and delay_secs > 0:
+                time.sleep(delay_secs)
+
+        success_chunks = [r for r in results if "error" not in r]
+        failed_chunks = [r for r in results if "error" in r]
+        logger.warning(
+            "[EXIT] Complete | symbol=%s success=%s failed=%s",
+            symbol,
+            len(success_chunks),
+            len(failed_chunks),
+        )
+        return {
+            "status": "exit_attempted",
+            "symbol": symbol,
+            "reason": reason,
+            "total_contracts": float(current_contracts),
+            "success_chunks": len(success_chunks),
+            "failed_chunks": len(failed_chunks),
+            "chunks": results,
+        }
+
+    async def emergency_exit_position_async(self, **kwargs: Any) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.emergency_exit_position, **kwargs)
 
     @staticmethod
     def _blocked_result(signal: Dict[str, Any], reason: str, message: str) -> Dict[str, Any]:
@@ -434,6 +691,12 @@ class ExecutionEngine:
             reduce_only = bool(signal.get("reduce_only") or signal.get("reduceOnly"))
             if regime == "risk_exit" or strategy_id.startswith("momentum_exit"):
                 reduce_only = True
+            is_exit = self._is_exit_signal(
+                signal,
+                strategy_id=strategy_id,
+                regime=regime,
+                reduce_only=reduce_only,
+            )
 
             order_params: Dict[str, Any] = {}
             provided_params = signal.get("params")
@@ -508,36 +771,23 @@ class ExecutionEngine:
                     logger.error("Could not determine reference price for contract sizing")
                     return None
 
-                if inverse:
-                    contracts = max(1, int(round((amount * float(ref_price)) / contract_size)))
-                else:
-                    contracts = max(1, int(round(amount / contract_size)))
-
-                if reduce_only:
-                    logger.warning(
-                        "Reduce-only order bypassing size/leverage guards | symbol=%s side=%s contracts=%s contract_size=%s price=%s inverse=%s",
-                        exchange_symbol,
-                        side,
-                        contracts,
-                        contract_size,
-                        ref_price,
-                        inverse,
+                equity = self._resolve_equity_for_guard(signal)
+                try:
+                    contracts, _raw_contracts, notional, leverage = self._convert_and_validate_contracts(
+                        base_qty=amount,
+                        contract_size=contract_size,
+                        equity=equity,
+                        mark_price=float(ref_price),
+                        symbol=exchange_symbol,
+                        inverse=inverse,
+                        is_exit=is_exit,
+                        reduce_only=reduce_only,
                     )
-                else:
-                    equity = self._resolve_equity_for_guard(signal)
-                    try:
-                        contracts, _raw_contracts, notional, leverage = self._convert_and_validate_contracts(
-                            base_qty=amount,
-                            contract_size=contract_size,
-                            equity=equity,
-                            mark_price=float(ref_price),
-                            symbol=exchange_symbol,
-                            inverse=inverse,
-                        )
-                    except ValueError as exc:
-                        logger.error("[ORDER BLOCKED] %s", exc)
-                        return self._blocked_result(signal, "size_guard_blocked", str(exc))
+                except ValueError as exc:
+                    logger.error("[ORDER BLOCKED] %s", exc)
+                    return self._blocked_result(signal, "size_guard_blocked", str(exc))
 
+                if not (is_exit or reduce_only):
                     risk_manager = getattr(self, "risk_manager", None)
                     if (
                         risk_manager is not None
@@ -559,17 +809,24 @@ class ExecutionEngine:
                             )
                             logger.error("[ORDER BLOCKED] %s", message)
                             return self._blocked_result(signal, "risk_manager_leverage_block", message)
-                    logger.info(
-                        "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s, notional=%.2f, leverage=%.2fx)",
-                        amount,
-                        contracts,
+                else:
+                    logger.warning(
+                        "Reduce-only/exit order bypassed pre-trade leverage checks | symbol=%s side=%s contracts=%s",
                         exchange_symbol,
-                        contract_size,
-                        ref_price,
-                        inverse,
-                        notional,
-                        leverage,
+                        side,
+                        contracts,
                     )
+                logger.info(
+                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s, notional=%.2f, leverage=%.2fx)",
+                    amount,
+                    contracts,
+                    exchange_symbol,
+                    contract_size,
+                    ref_price,
+                    inverse,
+                    notional,
+                    leverage,
+                )
                 amount = float(contracts)
 
             amount = float(self.exchange.amount_to_precision(exchange_symbol, amount))
