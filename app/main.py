@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response, status, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -314,6 +314,25 @@ async def receive_tradingview_signal_api_alias(request: Request) -> dict[str, An
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail="Invalid webhook response payload")
     return payload
+
+
+@app.get("/api/momentum/status")
+async def momentum_status_api_alias() -> dict[str, Any]:
+    payload = await routes_momentum.get_momentum_status()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid momentum status payload")
+    return payload
+
+
+@app.get("/api/momentum/history")
+async def momentum_history_api_alias(
+    limit: int = Query(50, ge=1, le=500),
+) -> dict[str, Any]:
+    payload = await routes_momentum.get_momentum_history(limit=limit)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid momentum history payload")
+    return payload
+
 
 @app.get("/health")
 async def health_check() -> dict[str, str | int | bool]:

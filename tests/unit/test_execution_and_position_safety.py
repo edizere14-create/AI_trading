@@ -483,6 +483,44 @@ def _build_trend_candles(rows: int = 60, base: float = 70000.0, step: float = 25
     )
 
 
+def test_demo_entry_gate_defaults_apply_in_sandbox_when_not_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KRAKEN_SANDBOX", "true")
+    monkeypatch.delenv("MOMENTUM_DEMO_RELAXED_ENTRY_GATES", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_CONF_GATE_PCT", raising=False)
+    monkeypatch.delenv("MOMENTUM_CONFIDENCE_GATE", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_CONVICTION_GATE", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_AGREEMENT_GATE", raising=False)
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+
+    assert worker.entry_confidence_gate_pct == pytest.approx(20.0)
+    assert worker.entry_conviction_gate == pytest.approx(0.12)
+    assert worker.entry_agreement_gate == pytest.approx(0.20)
+
+
+def test_live_entry_gate_defaults_stay_strict_when_sandbox_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KRAKEN_SANDBOX", "false")
+    monkeypatch.delenv("MOMENTUM_DEMO_RELAXED_ENTRY_GATES", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_CONF_GATE_PCT", raising=False)
+    monkeypatch.delenv("MOMENTUM_CONFIDENCE_GATE", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_CONVICTION_GATE", raising=False)
+    monkeypatch.delenv("MOMENTUM_ENTRY_AGREEMENT_GATE", raising=False)
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+
+    assert worker.entry_confidence_gate_pct == pytest.approx(55.0)
+    assert worker.entry_conviction_gate == pytest.approx(0.35)
+    assert worker.entry_agreement_gate == pytest.approx(0.30)
+
+
 def test_entry_gate_blocks_low_confidence_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MOMENTUM_ENFORCE_EXECUTION_GATES", "true")
     monkeypatch.setenv("MOMENTUM_ENTRY_CONF_GATE_PCT", "55")

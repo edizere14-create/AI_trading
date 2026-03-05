@@ -141,24 +141,40 @@ class MomentumWorker:
             self.live_taker_confidence_threshold = 90.0
         self.live_taker_confidence_threshold = max(0.0, min(self.live_taker_confidence_threshold, 100.0))
         self.enforce_execution_gates = self._env_bool("MOMENTUM_ENFORCE_EXECUTION_GATES", True)
+        execution_sandbox = bool(getattr(self.execution_engine, "sandbox", self._sandbox_mode_from_env(True)))
+        demo_relaxed_entry_gates = self._env_bool("MOMENTUM_DEMO_RELAXED_ENTRY_GATES", execution_sandbox)
+        default_conf_gate = "20.0" if demo_relaxed_entry_gates else "55.0"
+        default_conviction_gate = "0.12" if demo_relaxed_entry_gates else "0.35"
+        default_agreement_gate = "0.20" if demo_relaxed_entry_gates else "0.30"
         entry_conf_gate_raw = os.environ.get("MOMENTUM_ENTRY_CONF_GATE_PCT")
         if entry_conf_gate_raw is None:
-            entry_conf_gate_raw = os.environ.get("MOMENTUM_CONFIDENCE_GATE", "55.0")
+            entry_conf_gate_raw = os.environ.get("MOMENTUM_CONFIDENCE_GATE", default_conf_gate)
         try:
-            self.entry_confidence_gate_pct = float(entry_conf_gate_raw or "55.0")
+            self.entry_confidence_gate_pct = float(entry_conf_gate_raw or default_conf_gate)
         except (TypeError, ValueError):
-            self.entry_confidence_gate_pct = 55.0
+            self.entry_confidence_gate_pct = float(default_conf_gate)
         self.entry_confidence_gate_pct = max(0.0, min(self.entry_confidence_gate_pct, 100.0))
         try:
-            self.entry_conviction_gate = float(os.environ.get("MOMENTUM_ENTRY_CONVICTION_GATE", "0.35") or "0.35")
+            self.entry_conviction_gate = float(
+                os.environ.get("MOMENTUM_ENTRY_CONVICTION_GATE", default_conviction_gate) or default_conviction_gate
+            )
         except (TypeError, ValueError):
-            self.entry_conviction_gate = 0.35
+            self.entry_conviction_gate = float(default_conviction_gate)
         self.entry_conviction_gate = max(0.0, min(self.entry_conviction_gate, 1.0))
         try:
-            self.entry_agreement_gate = float(os.environ.get("MOMENTUM_ENTRY_AGREEMENT_GATE", "0.30") or "0.30")
+            self.entry_agreement_gate = float(
+                os.environ.get("MOMENTUM_ENTRY_AGREEMENT_GATE", default_agreement_gate) or default_agreement_gate
+            )
         except (TypeError, ValueError):
-            self.entry_agreement_gate = 0.30
+            self.entry_agreement_gate = float(default_agreement_gate)
         self.entry_agreement_gate = max(0.0, min(self.entry_agreement_gate, 1.0))
+        logger.info(
+            "Entry gates configured | conf>=%.2f conviction>=%.2f agreement>=%.2f demo_relaxed=%s",
+            self.entry_confidence_gate_pct,
+            self.entry_conviction_gate,
+            self.entry_agreement_gate,
+            demo_relaxed_entry_gates,
+        )
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
         try:
