@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,14 @@ class RiskConfig:
     max_daily_loss_pct: float = 0.05
     max_drawdown_pct: float = 0.15
     max_concurrent_positions: int = 3
+    max_leverage_ratio: float = 5.0
 
     # legacy aliases used elsewhere
     max_position_size: float | None = None
     daily_loss_limit_pct: float | None = None
     max_position_risk_pct: float | None = None
     max_drawdown: float | None = None
+    max_leverage: float | None = None
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
@@ -37,6 +40,8 @@ class RiskConfig:
             self.max_daily_loss_pct = float(self.daily_loss_limit_pct)
         if self.max_drawdown is not None:
             self.max_drawdown_pct = float(self.max_drawdown)
+        if self.max_leverage is not None:
+            self.max_leverage_ratio = float(self.max_leverage)
 
 
 class RiskManager:
@@ -50,6 +55,7 @@ class RiskManager:
         max_drawdown_pct: float = 0.15,
         max_concurrent_positions: int = 3,
         daily_profit_target_pct: float = 0.10,
+        max_leverage_ratio: float | None = None,
     ) -> None:
         # Accept RiskManager(RiskConfig(...))
         # Accept RiskManager(balance, RiskConfig(...))  <-- your current call
@@ -60,12 +66,14 @@ class RiskManager:
             max_daily_loss_pct = cfg.max_daily_loss_pct
             max_drawdown_pct = cfg.max_drawdown_pct
             max_concurrent_positions = cfg.max_concurrent_positions
+            max_leverage_ratio = cfg.max_leverage_ratio
         elif isinstance(max_position_pct, RiskConfig):
             cfg = max_position_pct
             max_position_pct = cfg.max_position_pct
             max_daily_loss_pct = cfg.max_daily_loss_pct
             max_drawdown_pct = cfg.max_drawdown_pct
             max_concurrent_positions = cfg.max_concurrent_positions
+            max_leverage_ratio = cfg.max_leverage_ratio
 
         self.account_balance = float(initial_balance)
         self.peak_balance = float(initial_balance)
@@ -77,6 +85,12 @@ class RiskManager:
         self.max_concurrent_positions = int(max_concurrent_positions)
         self.daily_profit_target = float(daily_profit_target_pct)
         self.daily_loss_limit = float(self.max_daily_loss_pct)
+        if max_leverage_ratio is None:
+            try:
+                max_leverage_ratio = float(os.getenv("MAX_LEVERAGE_RATIO", "5.0") or "5.0")
+            except (TypeError, ValueError):
+                max_leverage_ratio = 5.0
+        self.max_leverage_ratio = max(0.1, float(max_leverage_ratio))
 
         self.positions: dict[str, dict[str, Any]] = {}
         self.total_pnl = 0.0  # Backward-compatible alias for total realized PnL
@@ -93,12 +107,13 @@ class RiskManager:
         self.kill_switch_reason = ""
 
         logger.info(
-            "RiskManager initialized | balance=%.2f max_pos=%.2f%% daily_loss=%.2f%% max_dd=%.2f%% max_positions=%d",
+            "RiskManager initialized | balance=%.2f max_pos=%.2f%% daily_loss=%.2f%% max_dd=%.2f%% max_positions=%d max_lev=%.2fx",
             self.account_balance,
             self.max_position_pct * 100,
             self.max_daily_loss_pct * 100,
             self.max_drawdown_pct * 100,
             self.max_concurrent_positions,
+            self.max_leverage_ratio,
         )
 
     # Backward-compat alias
@@ -210,6 +225,44 @@ class RiskManager:
 
         return self.can_open_position(symbol, quantity, price)
 
+    def pre_trade_notional_check(
+        self,
+        contracts: int,
+        contract_size: float,
+        mark_price: float,
+        symbol: str,
+        inverse: bool = False,
+    ) -> bool:
+        """Secondary contract-level leverage check before order hits exchange."""
+        qty_contracts = abs(float(contracts))
+        size = float(contract_size)
+        px = float(mark_price)
+        if qty_contracts <= 0 or size <= 0 or px <= 0:
+            logger.error(
+                "[RISK MGR BLOCK] Invalid pre-trade sizing inputs | symbol=%s contracts=%s contract_size=%s mark=%s",
+                symbol,
+                contracts,
+                contract_size,
+                mark_price,
+            )
+            return False
+
+        notional = (qty_contracts * size) if inverse else (qty_contracts * size * px)
+        equity = float(self.account_balance)
+        leverage = (notional / equity) if equity > 0 else float("inf")
+
+        if leverage > self.max_leverage_ratio:
+            logger.error(
+                "[RISK MGR BLOCK] Pre-trade notional check failed: symbol=%s notional=%.2f equity=%.2f leverage=%.2fx max=%.2fx",
+                symbol,
+                notional,
+                equity,
+                leverage,
+                self.max_leverage_ratio,
+            )
+            return False
+        return True
+
     def open_position(self, symbol: str, side: str, quantity: float, price: float) -> None:
         self.positions[symbol] = {
             "symbol": symbol,
@@ -287,6 +340,7 @@ class RiskManager:
             "daily_gross_loss": round(self.daily_gross_loss, 2),
             "daily_loss_limit_pct": round(self.daily_loss_limit * 100.0, 2),
             "daily_profit_target_pct": round(self.daily_profit_target * 100.0, 2),
+            "max_leverage_ratio": round(self.max_leverage_ratio, 4),
             "normalized_daily_pnl_per_1k": round(normalized_daily_pnl_per_1k, 4),
             "drawdown_pct": round(self._drawdown_pct() * 100, 2),
             "open_positions": len(self.positions),

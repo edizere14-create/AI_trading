@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 import logging
+import os
 import time
 import asyncio
 from typing import Any, Dict, Tuple
@@ -44,6 +45,28 @@ class ExecutionEngine:
         self.exchange: ccxt.Exchange | None = None
         self.max_retries = 3
         self.retry_sleep_sec = 0.5
+        self.risk_manager: Any | None = None
+        try:
+            self.max_contracts_hard_limit = max(
+                1,
+                int(os.getenv("MAX_CONTRACTS_HARD_LIMIT", "5") or "5"),
+            )
+        except (TypeError, ValueError):
+            self.max_contracts_hard_limit = 5
+        try:
+            self.max_leverage_ratio = max(
+                0.1,
+                float(os.getenv("MAX_LEVERAGE_RATIO", "5.0") or "5.0"),
+            )
+        except (TypeError, ValueError):
+            self.max_leverage_ratio = 5.0
+        try:
+            self.fallback_equity = max(
+                0.0,
+                float(os.getenv("MOMENTUM_ACCOUNT_BALANCE", "1000") or "1000"),
+            )
+        except (TypeError, ValueError):
+            self.fallback_equity = 1000.0
 
         if not self.paper_mode:
             self.exchange = self._initialize_exchange()
@@ -54,6 +77,153 @@ class ExecutionEngine:
             self.exchange_id,
             self.sandbox,
         )
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_equity_for_guard(self, signal: Dict[str, Any]) -> float | None:
+        for key in ("equity", "account_equity", "account_balance"):
+            val = self._to_float(signal.get(key))
+            if val is not None and val > 0:
+                return val
+
+        risk_manager = getattr(self, "risk_manager", None)
+        if risk_manager is not None:
+            balance = self._to_float(getattr(risk_manager, "current_balance", None))
+            if balance is None:
+                balance = self._to_float(getattr(risk_manager, "account_balance", None))
+            if balance is not None and balance > 0:
+                return balance
+
+        if self.exchange is not None and hasattr(self.exchange, "fetch_balance"):
+            try:
+                balance = self.exchange.fetch_balance()
+                for bucket in ("total", "free"):
+                    section = balance.get(bucket)
+                    if isinstance(section, dict):
+                        for currency in ("USD", "USDT", "ZUSD"):
+                            val = self._to_float(section.get(currency))
+                            if val is not None and val > 0:
+                                return val
+                    else:
+                        val = self._to_float(section)
+                        if val is not None and val > 0:
+                            return val
+                direct_equity = self._to_float(balance.get("equity"))
+                if direct_equity is not None and direct_equity > 0:
+                    return direct_equity
+            except Exception as exc:
+                logger.warning("Could not fetch account equity for guard checks: %s", exc)
+
+        if self.fallback_equity > 0:
+            return self.fallback_equity
+
+        return None
+
+    def _convert_and_validate_contracts(
+        self,
+        base_qty: float,
+        contract_size: float,
+        equity: float | None,
+        mark_price: float,
+        symbol: str,
+        inverse: bool,
+    ) -> tuple[int, float, float, float]:
+        if contract_size <= 0:
+            contract_size = 1.0
+        if mark_price <= 0:
+            raise ValueError("mark price must be positive for contract conversion")
+        if equity is None or equity <= 0:
+            raise ValueError("missing positive equity for leverage guard")
+
+        if inverse:
+            raw_contracts = (base_qty * mark_price) / contract_size
+        else:
+            raw_contracts = base_qty / contract_size
+        intended_contracts = max(1, int(round(raw_contracts)))
+
+        if intended_contracts > self.max_contracts_hard_limit:
+            logger.error(
+                "[HARD STOP] Contract inflation blocked: base_qty=%s contract_size=%s raw=%.6f intended=%s limit=%s symbol=%s inverse=%s",
+                base_qty,
+                contract_size,
+                raw_contracts,
+                intended_contracts,
+                self.max_contracts_hard_limit,
+                symbol,
+                inverse,
+            )
+            raise ValueError(
+                f"Contract size inflation guard triggered: {intended_contracts} contracts exceeds hard limit {self.max_contracts_hard_limit}"
+            )
+
+        # Inverse contracts are quoted in USD notional per contract; linear contracts use contract_size * price.
+        notional = (
+            intended_contracts * contract_size
+            if inverse
+            else intended_contracts * contract_size * mark_price
+        )
+        leverage = notional / equity
+        if leverage > self.max_leverage_ratio:
+            logger.error(
+                "[HARD STOP] Leverage guard triggered: notional=%.2f equity=%.2f leverage=%.2fx max=%.2fx symbol=%s inverse=%s",
+                notional,
+                equity,
+                leverage,
+                self.max_leverage_ratio,
+                symbol,
+                inverse,
+            )
+            raise ValueError(
+                f"Leverage guard triggered: {leverage:.2f}x exceeds max allowed {self.max_leverage_ratio:.2f}x"
+            )
+
+        if raw_contracts < 0.5 and intended_contracts == 1:
+            logger.warning(
+                "[SIZE WARN] min(1) floor inflated size significantly: base_qty=%s raw_contracts=%.6f forced=1 notional=%.2f symbol=%s",
+                base_qty,
+                raw_contracts,
+                notional,
+                symbol,
+            )
+
+        logger.info(
+            "[SIZE OK] base_qty=%s contracts=%s notional=%.2f leverage=%.2fx symbol=%s",
+            base_qty,
+            intended_contracts,
+            notional,
+            leverage,
+            symbol,
+        )
+        return intended_contracts, raw_contracts, notional, leverage
+
+    @staticmethod
+    def _blocked_result(signal: Dict[str, Any], reason: str, message: str) -> Dict[str, Any]:
+        quantity = 0.0
+        try:
+            quantity = float(signal.get("quantity", 0.0) or 0.0)
+        except Exception:
+            quantity = 0.0
+
+        return {
+            "id": None,
+            "status": "blocked",
+            "symbol": str(signal.get("symbol", "")),
+            "side": str(signal.get("side", "")).lower(),
+            "quantity": quantity,
+            "filled": 0.0,
+            "avg_fill_price": None,
+            "price": None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metrics": {"slippage": 0.0, "fill_rate": 0.0, "latency_ms": 0.0},
+            "reason": reason,
+            "error": message,
+            "raw": {"error": message},
+        }
 
     def _initialize_exchange(self) -> ccxt.Exchange:
         """Initialize CCXT exchange client."""
@@ -331,25 +501,58 @@ class ExecutionEngine:
                 inverse = bool(market.get("inverse"))
                 ref_price = price
 
-                if inverse and ref_price is None:
+                if ref_price is None:
                     ticker = self.exchange.fetch_ticker(exchange_symbol)
                     ref_price = float(ticker.get("last") or 0)
-                if inverse and (ref_price is None or ref_price <= 0):
-                    logger.error("Could not determine reference price for inverse-contract sizing")
+                if ref_price is None or ref_price <= 0:
+                    logger.error("Could not determine reference price for contract sizing")
                     return None
 
-                if inverse:
-                    contracts = max(1, int(round((amount * float(ref_price)) / contract_size)))
-                else:
-                    contracts = max(1, int(round(amount / contract_size)))
+                equity = self._resolve_equity_for_guard(signal)
+                try:
+                    contracts, _raw_contracts, notional, leverage = self._convert_and_validate_contracts(
+                        base_qty=amount,
+                        contract_size=contract_size,
+                        equity=equity,
+                        mark_price=float(ref_price),
+                        symbol=exchange_symbol,
+                        inverse=inverse,
+                    )
+                except ValueError as exc:
+                    logger.error("[ORDER BLOCKED] %s", exc)
+                    return self._blocked_result(signal, "size_guard_blocked", str(exc))
+
+                risk_manager = getattr(self, "risk_manager", None)
+                if (
+                    risk_manager is not None
+                    and hasattr(risk_manager, "pre_trade_notional_check")
+                    and callable(getattr(risk_manager, "pre_trade_notional_check"))
+                ):
+                    ok = bool(
+                        risk_manager.pre_trade_notional_check(
+                            contracts=contracts,
+                            contract_size=contract_size,
+                            mark_price=float(ref_price),
+                            symbol=exchange_symbol,
+                            inverse=inverse,
+                        )
+                    )
+                    if not ok:
+                        message = (
+                            "risk manager blocked order: pre-trade notional/leverage check failed"
+                        )
+                        logger.error("[ORDER BLOCKED] %s", message)
+                        return self._blocked_result(signal, "risk_manager_leverage_block", message)
                 logger.info(
-                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s)",
+                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s, notional=%.2f, leverage=%.2fx)",
                     amount,
                     contracts,
                     exchange_symbol,
                     contract_size,
                     ref_price,
                     inverse,
+                    notional,
+                    leverage,
                 )
                 amount = float(contracts)
 

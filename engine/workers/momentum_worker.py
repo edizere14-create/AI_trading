@@ -120,8 +120,11 @@ class MomentumWorker:
             self.live_taker_confidence_threshold = 90.0
         self.live_taker_confidence_threshold = max(0.0, min(self.live_taker_confidence_threshold, 100.0))
         self.enforce_execution_gates = self._env_bool("MOMENTUM_ENFORCE_EXECUTION_GATES", True)
+        entry_conf_gate_raw = os.environ.get("MOMENTUM_ENTRY_CONF_GATE_PCT")
+        if entry_conf_gate_raw is None:
+            entry_conf_gate_raw = os.environ.get("MOMENTUM_CONFIDENCE_GATE", "55.0")
         try:
-            self.entry_confidence_gate_pct = float(os.environ.get("MOMENTUM_ENTRY_CONF_GATE_PCT", "55.0") or "55.0")
+            self.entry_confidence_gate_pct = float(entry_conf_gate_raw or "55.0")
         except (TypeError, ValueError):
             self.entry_confidence_gate_pct = 55.0
         self.entry_confidence_gate_pct = max(0.0, min(self.entry_confidence_gate_pct, 100.0))
@@ -220,6 +223,10 @@ class MomentumWorker:
             take_profit_pct=0.05,
         )
         self.risk_manager = RiskManager(account_balance, risk_config)
+        try:
+            setattr(self.execution_engine, "risk_manager", self.risk_manager)
+        except Exception:
+            pass
 
         self.is_running = False
         self.last_signal: Optional[Dict[str, Any]] = None
@@ -1654,7 +1661,7 @@ class MomentumWorker:
                 self.last_decision_reason = f"executing_exit:{str(exit_signal.get('exit_reason', 'unknown'))}"
                 exit_result = self.execution_engine.execute(exit_signal)
                 exit_status = str((exit_result or {}).get("status", "")).lower()
-                if exit_status in {"rejected", "cancelled", "canceled"}:
+                if exit_status in {"rejected", "cancelled", "canceled", "blocked"}:
                     detail = str(
                         (exit_result or {}).get("reason")
                         or (exit_result or {}).get("error")
@@ -1666,7 +1673,7 @@ class MomentumWorker:
                 if trade_record:
                     self.trade_history.append(trade_record)
                     self._persist_trade(trade_record)
-                if exit_result and exit_status not in {"rejected", "cancelled", "canceled"}:
+                if exit_result and exit_status not in {"rejected", "cancelled", "canceled", "blocked"}:
                     self.last_decision_reason = "exit_submitted"
                 elif not exit_result:
                     self.last_decision_reason = "exit_execution_returned_none"
@@ -1745,7 +1752,7 @@ class MomentumWorker:
                 self.last_decision_reason = "executing_entry"
                 result = self.execution_engine.execute(signal)
                 result_status = str((result or {}).get("status", "")).lower()
-                if result and result_status in {"rejected", "cancelled", "canceled"}:
+                if result and result_status in {"rejected", "cancelled", "canceled", "blocked"}:
                     order_record, trade_record = self._build_order_record(signal, result)
                     self.signal_history.append(order_record)
                     detail = str(

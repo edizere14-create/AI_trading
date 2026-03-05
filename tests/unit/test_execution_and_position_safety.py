@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 
 from engine.core.execution_engine import ExecutionEngine
+from engine.core.risk_manager import RiskManager
 from engine.workers.momentum_worker import MomentumWorker
 
 
@@ -70,12 +71,28 @@ class _DualMarketExchange(_DummyExchange):
         self.markets["BTC/USD:USD"] = linear_market
 
 
+class _BlockingRiskManager:
+    def pre_trade_notional_check(
+        self,
+        contracts: int,
+        contract_size: float,
+        mark_price: float,
+        symbol: str,
+        inverse: bool = False,
+    ) -> bool:
+        return False
+
+
 class _MinimalExecutionEngine:
     def __init__(self, paper_mode: bool) -> None:
         self.paper_mode = paper_mode
 
 
-def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
+def test_risk_exit_orders_are_reduce_only_for_futures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "10000")
+
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
         api_key="x",
@@ -103,7 +120,11 @@ def test_risk_exit_orders_are_reduce_only_for_futures() -> None:
     assert engine.exchange._last_amount == pytest.approx(50.0)
 
 
-def test_reduce_only_would_not_reduce_is_treated_as_cancelled() -> None:
+def test_reduce_only_would_not_reduce_is_treated_as_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "10000")
+
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
         api_key="x",
@@ -131,7 +152,11 @@ def test_reduce_only_would_not_reduce_is_treated_as_cancelled() -> None:
     assert (result.get("raw") or {}).get("reason") == "would_not_reduce_position"
 
 
-def test_insufficient_funds_returns_rejected_payload() -> None:
+def test_insufficient_funds_returns_rejected_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "10000")
+
     engine = ExecutionEngine(
         exchange_id="krakenfutures",
         api_key="x",
@@ -156,6 +181,131 @@ def test_insufficient_funds_returns_rejected_payload() -> None:
     assert result is not None
     assert result["status"] == "rejected"
     assert result.get("reason") == "insufficient_funds"
+
+
+def test_contract_inflation_guard_blocks_oversized_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "10000")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _DummyExchange()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "quantity": 0.001,
+            "order_kind": "taker",
+            "strategy_id": "momentum_v1",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "blocked"
+    assert result["reason"] == "size_guard_blocked"
+    assert "hard limit" in str(result.get("error", "")).lower()
+    assert engine.exchange._last_amount == pytest.approx(0.0)
+
+
+def test_leverage_guard_blocks_excessive_notional(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "1.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "100")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _DummyExchange()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "quantity": 0.01,
+            "order_kind": "taker",
+            "strategy_id": "momentum_v1",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "blocked"
+    assert result["reason"] == "size_guard_blocked"
+    assert "leverage guard triggered" in str(result.get("error", "")).lower()
+    assert engine.exchange._last_amount == pytest.approx(0.0)
+
+
+def test_execution_honors_risk_manager_pre_trade_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "50.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "10000")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _DummyExchange()
+    engine.risk_manager = _BlockingRiskManager()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "quantity": 0.001,
+            "order_kind": "taker",
+            "strategy_id": "momentum_v1",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "blocked"
+    assert result["reason"] == "risk_manager_leverage_block"
+    assert engine.exchange._last_amount == pytest.approx(0.0)
+
+
+def test_risk_manager_pre_trade_notional_check_enforces_max_leverage() -> None:
+    rm = RiskManager(
+        initial_balance=1000.0,
+        max_position_pct=0.5,
+        max_daily_loss_pct=0.1,
+        max_drawdown_pct=0.2,
+        max_concurrent_positions=3,
+        max_leverage_ratio=2.0,
+    )
+
+    assert rm.pre_trade_notional_check(
+        contracts=1500,
+        contract_size=1.0,
+        mark_price=50000.0,
+        symbol="PI_XBTUSD",
+        inverse=True,
+    ) is True
+    assert rm.pre_trade_notional_check(
+        contracts=2500,
+        contract_size=1.0,
+        mark_price=50000.0,
+        symbol="PI_XBTUSD",
+        inverse=True,
+    ) is False
 
 
 def test_symbol_resolution_prefers_linear_alias_when_available() -> None:
