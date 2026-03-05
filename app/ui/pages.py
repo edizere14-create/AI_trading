@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping, Protocol, TypedDict
 
 import pandas as pd
@@ -354,6 +355,16 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
     )
     entry_gate_conf_raw = pd.to_numeric(entry_gate_snapshot.get("confidence_pct"), errors="coerce")
     entry_gate_confidence = float(entry_gate_conf_raw) if pd.notna(entry_gate_conf_raw) else None
+    snapshot_ts_raw = entry_gate_snapshot.get("timestamp") or entry_gate_snapshot.get("evaluated_at")
+    snapshot_ts = pd.to_datetime(snapshot_ts_raw, errors="coerce", utc=True)
+    snapshot_age_sec: float | None = None
+    if pd.notna(snapshot_ts):
+        snapshot_age_sec = max(0.0, (pd.Timestamp.now(tz="UTC") - snapshot_ts).total_seconds())
+    try:
+        stale_after_sec = float(os.getenv("UI_ENTRY_GATE_STALE_SEC", "180") or "180")
+    except (TypeError, ValueError):
+        stale_after_sec = 180.0
+    stale_after_sec = max(30.0, stale_after_sec)
 
     ai_display: dict[str, Any] = dict(ai)
     metrics_display: dict[str, Any] = dict(metrics)
@@ -396,6 +407,13 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
         st.write(f"**Confidence:** {confidence_text}")
         if entry_gate_confidence is not None:
             st.caption(f"Execution gate confidence source: worker snapshot ({entry_gate_confidence:.2f}%).")
+        if snapshot_age_sec is not None:
+            st.caption(f"Entry gate snapshot age: {snapshot_age_sec:.0f}s")
+            if snapshot_age_sec > stale_after_sec:
+                st.warning(
+                    f"Entry gate snapshot appears stale ({snapshot_age_sec:.0f}s old). "
+                    "Worker may be paused/disconnected."
+                )
         st.write(f"**Volatility Forecast:** {vol_forecast_text}")
         st.write(f"**Pattern Detection:** {pattern_text}")
         with st.expander("Why this trade?"):

@@ -673,6 +673,7 @@ class MomentumWorker:
 
         snapshot: dict[str, Any] = {
             "side": side,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "confidence_pct": confidence_pct,
             "composite": float(composite),
             "trend_score": float(trend_score),

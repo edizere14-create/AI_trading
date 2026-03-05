@@ -166,6 +166,55 @@ def test_all_in_one_active_trades_backfill_mark_with_ticker(monkeypatch) -> None
     assert float(trades.loc[0, "unrealized_pnl"]) == -20.0
 
 
+def test_backend_metrics_preserve_zero_gate_confidence(monkeypatch) -> None:
+    def _fake_get_json(url: str, params=None):
+        if url.endswith("/momentum/status"):
+            return {
+                "ai": {"bias": "SELL", "confidence": 92.0},
+                "last_entry_gate_snapshot": {"confidence_pct": 0.0},
+            }
+        if url.endswith("/risk/status"):
+            return {
+                "account_balance": 5000.0,
+                "total_pnl": 0.0,
+                "daily_pnl": 0.0,
+                "exposure_pct": 0.0,
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(data_client, "_get_json", _fake_get_json)
+    monkeypatch.setattr(data_client, "get_active_trades", lambda api_url: pd.DataFrame())
+
+    metrics = data_client.get_metrics("http://127.0.0.1:8000")
+    assert metrics["confidence"] == 0.0
+
+
+def test_all_in_one_metrics_preserve_zero_gate_confidence(monkeypatch) -> None:
+    class _FakeExchange:
+        def fetch_ticker(self, symbol: str):
+            return {"last": 72000.0}
+
+        def fetch_balance(self):
+            return {"total": {"USD": 5000.0}}
+
+    monkeypatch.setattr(data_client, "_all_in_one_enabled", lambda _: True)
+    monkeypatch.setattr(data_client, "_build_exchange", lambda: _FakeExchange())
+    monkeypatch.setattr(
+        data_client,
+        "get_ai_insight",
+        lambda api_url: {"bias": "BUY", "confidence": 95.0},
+    )
+    monkeypatch.setattr(
+        data_client,
+        "get_worker_status",
+        lambda api_url: {"last_entry_gate_snapshot": {"confidence_pct": 0.0}},
+    )
+    monkeypatch.setattr(data_client, "get_active_trades", lambda api_url: pd.DataFrame())
+
+    metrics = data_client.get_metrics("all-in-one")
+    assert metrics["confidence"] == 0.0
+
+
 def test_portfolio_computes_weight_pct_from_active_trades(monkeypatch) -> None:
     monkeypatch.setattr(
         data_client,
