@@ -1,14 +1,21 @@
-version: '3.8'
-
+﻿
 services:
   api:
     build: .
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_trading
+      # - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_trading
       - KRAKEN_API_KEY=${KRAKEN_API_KEY}
       - KRAKEN_API_SECRET=${KRAKEN_API_SECRET}
+      - TRADING_PAPER_MODE=${TRADING_PAPER_MODE:-false}
+      - EXECUTION_EXCHANGE_ID=${EXECUTION_EXCHANGE_ID:-krakenfutures}
+      - MARKET_DATA_EXCHANGE_ID=${MARKET_DATA_EXCHANGE_ID:-krakenfutures}
+      - KRAKEN_FUTURES_DEMO=${KRAKEN_FUTURES_DEMO:-true}
+      - MOMENTUM_DEFAULT_SYMBOL=${MOMENTUM_DEFAULT_SYMBOL:-PI_XBTUSD}
+      - MOMENTUM_AUTO_START=${MOMENTUM_AUTO_START:-true}
+      - MOMENTUM_BUY_THRESHOLD=${MOMENTUM_BUY_THRESHOLD:-0.01}
+      - MOMENTUM_SELL_THRESHOLD=${MOMENTUM_SELL_THRESHOLD:--0.01}
     depends_on:
       - postgres
       - prometheus

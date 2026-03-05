@@ -8,6 +8,8 @@ class PlaceOrderRequest(BaseModel):
     quantity: float = Field(gt=0)
     price: float | None = None
     order_type: Literal["market", "limit"] = "market"
+    order_kind: Literal["maker", "taker"] = "taker"
+    expected_price: float | None = None
 
 class OrderResponse(BaseModel):
     order_id: str
@@ -16,10 +18,14 @@ class OrderResponse(BaseModel):
     side: str
     quantity: float
     price: float | None
+    filled_quantity: float | None = None
+    avg_fill_price: float | None = None
+    slippage: float | None = None
+    fill_rate: float | None = None
+    latency_ms: float | None = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 class OrderHistory(BaseModel):
     order_id: str
@@ -28,8 +34,12 @@ class OrderHistory(BaseModel):
     quantity: float
     price: float | None
     status: str
+    filled_quantity: float | None = None
+    avg_fill_price: float | None = None
+    slippage: float | None = None
+    fill_rate: float | None = None
+    latency_ms: float | None = None
     created_at: datetime
     filled_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}

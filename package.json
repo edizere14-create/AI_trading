@@ -1,0 +1,28 @@
+{
+  "name": "ai-trading-prisma-tools",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "local:smoke": "powershell -ExecutionPolicy Bypass -File ./scripts/smoke_local.ps1",
+    "local:smoke:all": "powershell -ExecutionPolicy Bypass -File ./scripts/smoke_local_all.ps1",
+    "kraken:demo:smoke": ".venv\\Scripts\\python.exe scripts/kraken_futures_demo_smoke.py",
+    "kraken:demo:smoke:ps": "powershell -ExecutionPolicy Bypass -File ./scripts/run_kraken_demo_smoke.ps1",
+    "prisma:generate": "prisma generate",
+    "prisma:validate": "prisma validate",
+    "prisma:format": "prisma format",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:status": "prisma migrate status",
+    "prisma:migrate:reset": "prisma migrate reset",
+    "prisma:studio": "prisma studio",
+    "quality:lint": ".venv\\Scripts\\python.exe -m ruff check streamlit_app.py app/ui/pages.py app/ui/data_client.py app/ui/theme.py",
+    "quality:type": ".venv\\Scripts\\python.exe -m mypy --config-file mypy.ini streamlit_app.py app/ui/pages.py app/ui/data_client.py app/ui/theme.py",
+    "quality:all": "npm run quality:lint && npm run quality:type"
+  },
+  "devDependencies": {
+    "prisma": "^6.6.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.6.0"
+  }
+}

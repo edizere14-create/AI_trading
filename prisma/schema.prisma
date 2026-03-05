@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PositionSide {
+  LONG
+  SHORT
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+  LIQUIDATED
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum TradeStatus {
+  PENDING
+  FILLED
+  CANCELLED
+  REJECTED
+}
+
+enum BacktestStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+enum ActivityType {
+  LOGIN
+  TRADE_CREATE
+  TRADE_CLOSE
+  BACKTEST_RUN
+  CONFIG_UPDATE
+  API_KEY_UPDATE
+  SYSTEM_EVENT
+}
+
+model User {
+  id               String             @id @default(cuid())
+  username         String             @unique
+  email            String             @unique
+  hashedPassword   String
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  portfolios       Portfolio[]
+  positions        Position[]
+  trades           Trade[]
+  strategyConfigs  StrategyConfig[]
+  backtestResults  BacktestResult[]
+  apiKeyConnections ApiKeyConnection[]
+  activityLogs     ActivityLog[]
+
+  @@index([createdAt])
+}
+
+model Portfolio {
+  id               String            @id @default(cuid())
+  userId           String
+  name             String
+  baseCurrency     String            @default("USD")
+  isDefault        Boolean           @default(false)
+  cashBalance      Decimal           @default(0) @db.Decimal(18, 6)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  positions        Position[]
+  trades           Trade[]
+  strategyConfigs  StrategyConfig[]
+  backtestResults  BacktestResult[]
+  activityLogs     ActivityLog[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Position {
+  id               String            @id @default(cuid())
+  userId           String
+  portfolioId      String
+  symbol           String
+  side             PositionSide
+  status           PositionStatus    @default(OPEN)
+  quantity         Decimal           @db.Decimal(20, 8)
+  entryPrice       Decimal           @db.Decimal(20, 8)
+  markPrice        Decimal?          @db.Decimal(20, 8)
+  stopLoss         Decimal?          @db.Decimal(20, 8)
+  takeProfit       Decimal?          @db.Decimal(20, 8)
+  leverage         Decimal?          @db.Decimal(10, 4)
+  openedAt         DateTime          @default(now())
+  closedAt         DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio        Portfolio         @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  trades           Trade[]
+  activityLogs     ActivityLog[]
+
+  @@index([userId, status])
+  @@index([portfolioId, symbol])
+  @@index([symbol])
+  @@index([openedAt])
+}
+
+model Trade {
+  id               String            @id @default(cuid())
+  userId           String
+  portfolioId      String
+  positionId       String?
+  strategyConfigId String?
+  symbol           String
+  side             TradeSide
+  status           TradeStatus       @default(PENDING)
+  orderType        String            @default("market")
+  quantity         Decimal           @db.Decimal(20, 8)
+  price            Decimal?          @db.Decimal(20, 8)
+  filledQuantity   Decimal           @default(0) @db.Decimal(20, 8)
+  fee              Decimal?          @db.Decimal(20, 8)
+  pnl              Decimal?          @db.Decimal(20, 8)
+  executedAt       DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio        Portfolio         @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  position         Position?         @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  strategyConfig   StrategyConfig?   @relation(fields: [strategyConfigId], references: [id], onDelete: SetNull)
+  activityLogs     ActivityLog[]
+
+  @@index([userId, createdAt])
+  @@index([portfolioId, symbol, createdAt])
+  @@index([positionId])
+  @@index([strategyConfigId])
+}
+
+model StrategyConfig {
+  id               String            @id @default(cuid())
+  userId           String
+  portfolioId      String?
+  name             String
+  symbol           String?
+  timeframe        String?
+  mode             String?
+  isEnabled        Boolean           @default(true)
+  riskPerTrade     Decimal?          @db.Decimal(10, 4)
+  maxLeverage      Decimal?          @db.Decimal(10, 4)
+  params           Json?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio        Portfolio?        @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  trades           Trade[]
+  backtestResults  BacktestResult[]
+
+  @@unique([userId, name])
+  @@index([userId, isEnabled])
+  @@index([portfolioId])
+}
+
+model BacktestResult {
+  id               String            @id @default(cuid())
+  userId           String
+  portfolioId      String?
+  strategyConfigId String?
+  symbol           String
+  timeframe        String
+  startDate        DateTime
+  endDate          DateTime
+  status           BacktestStatus    @default(COMPLETED)
+  initialCapital   Decimal           @db.Decimal(18, 6)
+  finalValue       Decimal           @db.Decimal(18, 6)
+  totalReturn      Decimal?          @db.Decimal(10, 4)
+  sharpeRatio      Decimal?          @db.Decimal(10, 4)
+  sortinoRatio     Decimal?          @db.Decimal(10, 4)
+  maxDrawdown      Decimal?          @db.Decimal(10, 4)
+  winRate          Decimal?          @db.Decimal(10, 4)
+  totalTrades      Int?
+  metadata         Json?
+  createdAt        DateTime          @default(now())
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio        Portfolio?        @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  strategyConfig   StrategyConfig?   @relation(fields: [strategyConfigId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([strategyConfigId])
+  @@index([portfolioId])
+  @@index([symbol, timeframe])
+}
+
+model ApiKeyConnection {
+  id                 String           @id @default(cuid())
+  userId             String
+  provider           String
+  label              String?
+  apiKeyMasked       String?
+  apiKeyEncrypted    String
+  apiSecretEncrypted String
+  passphraseEncrypted String?
+  status             ConnectionStatus @default(ACTIVE)
+  lastCheckedAt      DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  user               User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activityLogs       ActivityLog[]
+
+  @@unique([userId, provider, label])
+  @@index([userId, status])
+  @@index([provider])
+}
+
+model ActivityLog {
+  id                 String            @id @default(cuid())
+  userId             String
+  portfolioId        String?
+  positionId         String?
+  tradeId            String?
+  apiKeyConnectionId String?
+  activityType       ActivityType
+  message            String
+  metadata           Json?
+  ipAddress          String?
+  createdAt          DateTime          @default(now())
+
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  portfolio          Portfolio?        @relation(fields: [portfolioId], references: [id], onDelete: SetNull)
+  position           Position?         @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  trade              Trade?            @relation(fields: [tradeId], references: [id], onDelete: SetNull)
+  apiKeyConnection   ApiKeyConnection? @relation(fields: [apiKeyConnectionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([activityType, createdAt])
+  @@index([portfolioId])
+  @@index([positionId])
+  @@index([tradeId])
+  @@index([apiKeyConnectionId])
+}

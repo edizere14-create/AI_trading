@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Enum, Boolean, Numeric
 from sqlalchemy.sql import func
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from typing import Any
 import enum
 
@@ -9,6 +9,7 @@ Base: Any = declarative_base()
 class OrderStatus(str, enum.Enum):
     PENDING = "pending"
     FILLED = "filled"
+    PARTIAL = "partial"
     CANCELLED = "cancelled"
     REJECTED = "rejected"
 
@@ -21,12 +22,20 @@ class Order(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    order_id = Column(String, unique=True, index=True)
     symbol = Column(String, nullable=False)
     side: Any = Column(Enum(OrderSide), nullable=False)
     order_type = Column(String, nullable=False)
+    order_kind = Column(String, default="taker")
     quantity = Column(Float, nullable=False)
     price = Column(Float)
+    filled_quantity = Column(Float, default=0.0)
+    avg_fill_price = Column(Float)
+    slippage = Column(Float)
+    fill_rate = Column(Float)
+    latency_ms = Column(Float)
     status = Column(Enum(OrderStatus), default=OrderStatus.PENDING)
+    filled_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

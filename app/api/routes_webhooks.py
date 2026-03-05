@@ -1,9 +1,12 @@
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, Field
 from typing import Dict, Any
 import logging
 import hmac
 import hashlib
+import os
+import json
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +15,13 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 class TradingViewSignal(BaseModel):
     """TradingView webhook signal schema"""
-    symbol: str
+    symbol: str | None = None
+    ticker: str | None = None
     action: str  # "buy", "sell", "close"
-    price: float
-    timestamp: str
+    price: float | None = None
+    size: float | None = None
+    timestamp: str | None = None
+    passphrase: str | None = Field(default=None, repr=False)
 
 
 class DeribitSignal(BaseModel):
@@ -42,8 +48,33 @@ async def verify_webhook_signature(request: Request, secret: str) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
+def _log_event(level: int, event: str, **fields: Any) -> None:
+    payload = {
+        "event": event,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
+    logger.log(level, json.dumps(payload, default=str, ensure_ascii=False))
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = str(request.headers.get("x-forwarded-for", "")).strip()
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    if request.client and request.client.host:
+        return str(request.client.host)
+    return "unknown"
+
+
+def _normalized_symbol(signal: TradingViewSignal) -> str:
+    preferred = signal.symbol or signal.ticker
+    if preferred is None:
+        return ""
+    return str(preferred).strip().upper()
+
+
 @router.post("/tradingview")
-async def receive_tradingview_signal(signal: TradingViewSignal, request: Request):
+async def receive_tradingview_signal(request: Request) -> dict[str, Any]:
     """
     Receive signals from TradingView alerts
     
@@ -58,46 +89,83 @@ async def receive_tradingview_signal(signal: TradingViewSignal, request: Request
         "timestamp": "2026-02-18T21:15:00Z"
     }
     """
+    client_ip = _client_ip(request)
+    raw_payload: dict[str, Any]
+
     try:
-        # Verify signature if secret is set
-        secret = "your_tradingview_secret"  # Load from env
-        if secret and not await verify_webhook_signature(request, secret):
-            raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        logger.info(f"TradingView signal: {signal.symbol} {signal.action} @ {signal.price}")
-        
-        # Execute action based on signal
-        if signal.action == "buy":
-            # TODO: Place buy order
-            pass
-        elif signal.action == "sell":
-            # TODO: Place sell order
-            pass
-        elif signal.action == "close":
-            # TODO: Close position
-            pass
-        
+        parsed_json = await request.json()
+    except Exception as exc:
+        _log_event(logging.ERROR, "webhook_parse_error", source="tradingview", reason="invalid_json", ip=client_ip, error=str(exc))
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    if not isinstance(parsed_json, dict):
+        _log_event(logging.ERROR, "webhook_validation_error", source="tradingview", reason="payload_not_object", ip=client_ip)
+        raise HTTPException(status_code=422, detail="Webhook payload must be a JSON object")
+
+    raw_payload = parsed_json
+
+    try:
+        signal = TradingViewSignal.model_validate(raw_payload)
+    except ValidationError as exc:
+        _log_event(logging.ERROR, "webhook_validation_error", source="tradingview", reason="schema_validation_failed", ip=client_ip, errors=exc.errors())
+        raise HTTPException(status_code=422, detail="Invalid TradingView payload schema") from exc
+
+    secret = os.getenv("TRADINGVIEW_WEBHOOK_SECRET", "").strip()
+    if secret and not await verify_webhook_signature(request, secret):
+        _log_event(logging.WARNING, "webhook_auth_failed", source="tradingview", reason="invalid_signature", ip=client_ip)
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    webhook_passphrase = os.getenv("WEBHOOK_PASSPHRASE", "").strip()
+    if webhook_passphrase and (signal.passphrase or "") != webhook_passphrase:
+        _log_event(logging.WARNING, "webhook_auth_failed", source="tradingview", reason="invalid_passphrase", ip=client_ip)
+        raise HTTPException(status_code=401, detail="Invalid passphrase")
+
+    symbol = _normalized_symbol(signal)
+    action = str(signal.action or "").strip().lower()
+    if action not in {"buy", "sell", "close"}:
+        _log_event(logging.ERROR, "webhook_execution_rejected", source="tradingview", reason="unsupported_action", ip=client_ip, action=action, symbol=symbol)
+        raise HTTPException(status_code=422, detail="action must be one of: buy, sell, close")
+
+    if not symbol:
+        _log_event(logging.ERROR, "webhook_execution_rejected", source="tradingview", reason="missing_symbol", ip=client_ip, action=action)
+        raise HTTPException(status_code=422, detail="symbol or ticker is required")
+
+    try:
+        _log_event(
+            logging.INFO,
+            "webhook_signal_received",
+            source="tradingview",
+            ip=client_ip,
+            action=action,
+            symbol=symbol,
+            size=signal.size,
+            price=signal.price,
+        )
         return {
             "status": "received",
-            "symbol": signal.symbol,
-            "action": signal.action
+            "symbol": symbol,
+            "action": action,
         }
-        
-    except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log_event(logging.ERROR, "webhook_execution_error", source="tradingview", reason="unexpected_exception", ip=client_ip, action=action, symbol=symbol, error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/metrics")
-async def expose_metrics():
+async def expose_metrics() -> Any:
     """
     Prometheus metrics endpoint
     Access at: http://localhost:8000/api/webhooks/metrics
     """
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     from fastapi.responses import Response
-    
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST
-    )
+
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        return Response(
+            content=generate_latest(),
+            media_type=CONTENT_TYPE_LATEST,
+        )
+    except ModuleNotFoundError:
+        return Response(content="# prometheus_client not installed\n", media_type="text/plain")

@@ -13,7 +13,8 @@ if config.config_file_name is not None:
 
 # Prefer DATABASE_URL if set
 database_url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
-config.set_main_option("sqlalchemy.url", database_url)
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
 
 # Import Base metadata
 try:
