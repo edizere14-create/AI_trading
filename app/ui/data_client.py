@@ -254,6 +254,104 @@ def _contracts_to_display_quantity(symbol: str, contracts: float, price: float, 
     return qty_contracts * size
 
 
+def _backend_last_price(api_url: str) -> float | None:
+    try:
+        status = _get_json(f"{api_url}/momentum/status")
+    except Exception:
+        return None
+    if not isinstance(status, dict):
+        return None
+
+    direct = _safe_float(status.get("last_price"))
+    if direct is not None and direct > 0:
+        return float(direct)
+
+    last_signal = status.get("last_signal")
+    if isinstance(last_signal, dict):
+        signal_price = _safe_float(last_signal.get("price"))
+        if signal_price is not None and signal_price > 0:
+            return float(signal_price)
+    return None
+
+
+def _augment_backend_positions(api_url: str, df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    out = df.copy()
+    if "side" in out.columns:
+        side_norm = out["side"].astype(str).str.lower()
+        side_norm = side_norm.replace({"long": "buy", "short": "sell"})
+        out["side"] = side_norm
+    else:
+        out["side"] = "buy"
+
+    for col in ("quantity", "contracts", "entry_price", "current_price", "unrealized_pnl", "notional", "leverage"):
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    if "quantity" not in out.columns:
+        if "contracts" in out.columns:
+            out["quantity"] = pd.to_numeric(out["contracts"], errors="coerce").abs()
+        else:
+            out["quantity"] = 0.0
+    elif "contracts" in out.columns:
+        out["quantity"] = pd.to_numeric(out["quantity"], errors="coerce").fillna(
+            pd.to_numeric(out["contracts"], errors="coerce").abs()
+        )
+    else:
+        out["quantity"] = pd.to_numeric(out["quantity"], errors="coerce")
+
+    if "entry_price" not in out.columns:
+        out["entry_price"] = pd.NA
+    out["entry_price"] = pd.to_numeric(out["entry_price"], errors="coerce")
+
+    if "current_price" not in out.columns:
+        out["current_price"] = pd.NA
+    out["current_price"] = pd.to_numeric(out["current_price"], errors="coerce")
+
+    needs_mark = out["current_price"].isna() | (out["current_price"] <= 0)
+    if needs_mark.any():
+        last_price = _backend_last_price(api_url)
+        if isinstance(last_price, float) and last_price > 0:
+            out.loc[needs_mark, "current_price"] = float(last_price)
+
+    fill_from_entry = out["current_price"].isna() & out["entry_price"].notna()
+    if fill_from_entry.any():
+        out.loc[fill_from_entry, "current_price"] = out.loc[fill_from_entry, "entry_price"]
+
+    if "unrealized_pnl" not in out.columns:
+        out["unrealized_pnl"] = pd.NA
+    out["unrealized_pnl"] = pd.to_numeric(out["unrealized_pnl"], errors="coerce")
+
+    side = out["side"].astype(str).str.lower()
+    qty = pd.to_numeric(out["quantity"], errors="coerce").fillna(0.0).abs()
+    entry = pd.to_numeric(out["entry_price"], errors="coerce").fillna(0.0)
+    mark = pd.to_numeric(out["current_price"], errors="coerce").fillna(entry)
+
+    computed_unrealized = (mark - entry) * qty
+    computed_unrealized = computed_unrealized.where(side == "buy", (entry - mark) * qty)
+
+    missing_unrealized = out["unrealized_pnl"].isna()
+    zero_unrealized = out["unrealized_pnl"].fillna(0.0).abs() < 1e-9
+    out.loc[missing_unrealized | zero_unrealized, "unrealized_pnl"] = computed_unrealized
+
+    if "notional" not in out.columns:
+        out["notional"] = pd.NA
+    out["notional"] = pd.to_numeric(out["notional"], errors="coerce")
+    missing_notional = out["notional"].isna() | (out["notional"] <= 0)
+    out.loc[missing_notional, "notional"] = qty * mark
+
+    if "leverage" not in out.columns:
+        out["leverage"] = 0.0
+    out["leverage"] = pd.to_numeric(out["leverage"], errors="coerce").fillna(0.0)
+
+    if "source" not in out.columns:
+        out["source"] = "backend"
+
+    return out
+
+
 def get_worker_status(api_url: str) -> dict[str, Any]:
     candidates: list[str] = []
     if _all_in_one_enabled(api_url):
@@ -524,7 +622,7 @@ def get_active_trades(api_url: str) -> pd.DataFrame:
         data = data.get("positions", [])
     if not isinstance(data, list):
         raise ApiContractError("Contract mismatch: /risk/positions must return list or {'positions': list}.")
-    api_df = pd.DataFrame(data)
+    api_df = _augment_backend_positions(api_url, pd.DataFrame(data))
     paper_df = _paper_positions_df()
     if api_df.empty:
         return paper_df

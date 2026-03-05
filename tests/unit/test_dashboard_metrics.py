@@ -81,3 +81,60 @@ def test_backend_metrics_keep_reported_values_when_non_zero(monkeypatch) -> None
 
     assert metrics["daily_pnl"] == 15.0
     assert metrics["risk_exposure"] == 12.0
+
+
+def test_active_trades_backfills_mark_and_unrealized_from_worker_status(monkeypatch) -> None:
+    def _fake_get_json(url: str, params=None):
+        if url.endswith("/risk/positions"):
+            return {
+                "positions": [
+                    {
+                        "symbol": "BTC/USD:USD",
+                        "side": "buy",
+                        "quantity": 2.0,
+                        "entry_price": 100.0,
+                    }
+                ]
+            }
+        if url.endswith("/momentum/status"):
+            return {"last_price": 90.0}
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(data_client, "_get_json", _fake_get_json)
+
+    df = data_client.get_active_trades("http://127.0.0.1:8000")
+    assert not df.empty
+    assert float(df.loc[0, "current_price"]) == 90.0
+    assert float(df.loc[0, "unrealized_pnl"]) == -20.0
+    assert float(df.loc[0, "notional"]) == 180.0
+
+
+def test_metrics_use_backfilled_unrealized_when_risk_status_is_zero(monkeypatch) -> None:
+    def _fake_get_json(url: str, params=None):
+        if url.endswith("/momentum/status"):
+            return {"last_price": 90.0, "ai": {"bias": "BUY", "confidence": 70.0}}
+        if url.endswith("/risk/status"):
+            return {
+                "account_balance": 1000.0,
+                "total_pnl": 0.0,
+                "daily_pnl": 0.0,
+                "exposure_pct": 0.0,
+            }
+        if url.endswith("/risk/positions"):
+            return {
+                "positions": [
+                    {
+                        "symbol": "BTC/USD:USD",
+                        "side": "buy",
+                        "quantity": 2.0,
+                        "entry_price": 100.0,
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(data_client, "_get_json", _fake_get_json)
+
+    metrics = data_client.get_metrics("http://127.0.0.1:8000")
+    assert metrics["daily_pnl"] == -20.0
+    assert metrics["risk_exposure"] == 18.0
