@@ -3,7 +3,7 @@ import pandas as pd
 
 from engine.core.execution_engine import ExecutionEngine
 from engine.core.risk_manager import RiskManager
-from engine.workers.momentum_worker import MomentumWorker
+from engine.workers.momentum_worker import ExitReason, MomentumWorker
 
 
 class _DummyExchange:
@@ -458,6 +458,7 @@ def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
     monkeypatch.setenv("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "50")
+    monkeypatch.setenv("HYSTERESIS_CONFIDENCE", "1")
 
     worker = MomentumWorker(
         symbol="PI_XBTUSD",
@@ -487,8 +488,8 @@ def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPat
 
     assert exit_signal is not None
     assert exit_signal["side"] == "sell"
-    assert exit_signal["exit_reason"] == "confidence_below_50"
-    assert worker.last_exit_gate_snapshot.get("reason") == "confidence_below_50"
+    assert exit_signal["exit_reason"] == ExitReason.CONFIDENCE_FLOOR.value
+    assert worker.last_exit_gate_snapshot.get("reason") == ExitReason.CONFIDENCE_FLOOR.value
 
 
 def test_exit_gate_does_not_trigger_when_conditions_are_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,6 +527,7 @@ def test_exit_gate_does_not_trigger_when_conditions_are_healthy(monkeypatch: pyt
 
 def test_exit_gate_equality_boundaries_do_not_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+    monkeypatch.setenv("HYSTERESIS_CONFIDENCE", "1")
 
     worker = MomentumWorker(
         symbol="PI_XBTUSD",
@@ -570,3 +572,108 @@ def test_exit_gate_equality_boundaries_do_not_trigger(monkeypatch: pytest.Monkey
     assert snapshot["gates"]["pattern_break"] is False
     assert snapshot["gates"]["imbalance_break"] is False
     assert snapshot["gates"]["opposite_imbalance_spike"] is False
+
+
+def test_loss_cut_label_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_EXIT_MAX_LOSS_PCT", "0.035")
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    assert worker._get_loss_cut_label(is_long=True) == f"{ExitReason.LOSS_CUT.value}_3.5pct"
+    assert worker._get_loss_cut_label(is_long=False) == f"{ExitReason.LOSS_CUT.value}_3.5pct_short"
+
+
+def test_confidence_exit_hysteresis_requires_two_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_EXIT_CONFIDENCE_FLOOR_PCT", "50")
+    monkeypatch.setenv("HYSTERESIS_CONFIDENCE", "2")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    worker.risk_manager.open_position("PI_XBTUSD", "buy", 0.001, 73000.0)
+
+    weak_context = {
+        "price": 73100.0,
+        "confidence": 30.0,
+        "composite_long": 0.40,
+        "trend_score": 0.60,
+        "pattern_long": 0.50,
+        "imbalance_long": 0.55,
+        "imbalance_short": 0.10,
+        "momentum": 1.0,
+        "atr": 45.0,
+        "vol_ma20": 1000.0,
+        "vol_last": 1000.0,
+        "correlation": 0.1,
+        "reversal_long": False,
+    }
+    worker._compute_context_metrics = lambda _: weak_context  # type: ignore[assignment]
+
+    first = worker._build_exit_signal_if_needed(_build_trend_candles(60))
+    assert first is None
+    assert worker.gate_fail_counts["confidence"] == 1
+
+    second = worker._build_exit_signal_if_needed(_build_trend_candles(60))
+    assert second is not None
+    assert second["exit_reason"] == ExitReason.CONFIDENCE_FLOOR.value
+    assert worker.gate_fail_counts["confidence"] == 0
+
+
+def test_hysteresis_recovery_resets_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")
+    monkeypatch.setenv("HYSTERESIS_CONFIDENCE", "3")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    guard = {
+        "stop_price": 72000.0,
+        "risk_r": 0.02,
+        "entry_momentum": 1.0,
+        "entry_atr": 45.0,
+    }
+    weak_context = {
+        "confidence": 30.0,
+        "composite_long": 0.40,
+        "trend_score": 0.60,
+        "pattern_long": 0.50,
+        "imbalance_long": 0.55,
+        "imbalance_short": 0.10,
+        "momentum": 1.0,
+        "atr": 45.0,
+        "vol_ma20": 1000.0,
+        "vol_last": 1000.0,
+        "correlation": 0.1,
+        "reversal_long": False,
+    }
+    healthy_context = dict(weak_context)
+    healthy_context["confidence"] = 95.0
+
+    reason, _ = worker._evaluate_exit_logic(
+        position_side="buy",
+        context=weak_context,
+        current_price=73100.0,
+        entry_price=73000.0,
+        bars_held=0,
+        guard=guard,
+    )
+    assert reason == ""
+    assert worker.gate_fail_counts["confidence"] == 1
+
+    reason, _ = worker._evaluate_exit_logic(
+        position_side="buy",
+        context=healthy_context,
+        current_price=73100.0,
+        entry_price=73000.0,
+        bars_held=0,
+        guard=guard,
+    )
+    assert reason == ""
+    assert worker.gate_fail_counts["confidence"] == 0

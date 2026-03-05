@@ -10,6 +10,7 @@ import logging
 import os
 from collections import deque
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -43,6 +44,26 @@ except ImportError:
     trade_store = _NullTradeStore()
 
 logger = logging.getLogger(__name__)
+
+
+class ExitReason(str, Enum):
+    CONFIDENCE_FLOOR = "gate_confidence_floor"
+    COMPOSITE_FLOOR = "gate_composite_floor"
+    TREND_FLOOR = "gate_trend_floor"
+    PATTERN_FLOOR = "gate_pattern_floor"
+    IMBALANCE_FLOOR = "gate_imbalance_floor"
+    OPPOSITE_SPIKE = "gate_opposite_imbalance_spike"
+    PROFIT_LOCK = "profit_lock_stop"
+    STRONG_REVERSAL = "strong_reversal"
+    TIME_STOP = "time_stop"
+    VOLATILITY_CONTRACT = "volatility_contraction"
+    LIQUIDITY_VACUUM = "liquidity_vacuum"
+    CORRELATION_SPIKE = "correlation_spike"
+    LOSS_CUT = "loss_cut"
+    LEVERAGE_BREACH = "leverage_breach"
+    CONTRACT_INFLATION = "contract_inflation"
+    MANUAL_UI = "manual_ui_trigger"
+    MAX_DRAWDOWN = "stopped_max_drawdown"
 
 
 class MomentumWorker:
@@ -178,6 +199,36 @@ class MomentumWorker:
             os.environ.get("MOMENTUM_EXIT_OPPOSITE_IMBALANCE_SPIKE", "0.25") or "0.25"
         )
         self.exit_opposite_imbalance_spike = max(0.0, min(self.exit_opposite_imbalance_spike, 1.0))
+        self.gate_fail_counts: dict[str, int] = {
+            "confidence": 0,
+            "composite": 0,
+            "trend": 0,
+            "pattern": 0,
+            "imbalance": 0,
+            "opposite_spike": 0,
+            "profit_lock": 0,
+            "strong_reversal": 0,
+            "time_stop": 0,
+            "volatility_contract": 0,
+            "liquidity_vacuum": 0,
+            "correlation_spike": 0,
+            "loss_cut": 0,
+        }
+        self.gate_fail_thresholds: dict[str, int] = {
+            "confidence": self._env_int("HYSTERESIS_CONFIDENCE", 2, minimum=1),
+            "composite": self._env_int("HYSTERESIS_COMPOSITE", 2, minimum=1),
+            "trend": self._env_int("HYSTERESIS_TREND", 2, minimum=1),
+            "pattern": self._env_int("HYSTERESIS_PATTERN", 2, minimum=1),
+            "imbalance": self._env_int("HYSTERESIS_IMBALANCE", 2, minimum=1),
+            "opposite_spike": self._env_int("HYSTERESIS_OPPOSITE_SPIKE", 1, minimum=1),
+            "profit_lock": self._env_int("HYSTERESIS_PROFIT_LOCK", 1, minimum=1),
+            "strong_reversal": self._env_int("HYSTERESIS_STRONG_REVERSAL", 2, minimum=1),
+            "time_stop": self._env_int("HYSTERESIS_TIME_STOP", 1, minimum=1),
+            "volatility_contract": self._env_int("HYSTERESIS_VOL_CONTRACT", 3, minimum=1),
+            "liquidity_vacuum": self._env_int("HYSTERESIS_LIQUIDITY", 3, minimum=1),
+            "correlation_spike": self._env_int("HYSTERESIS_CORRELATION", 3, minimum=1),
+            "loss_cut": self._env_int("HYSTERESIS_LOSS_CUT", 1, minimum=1),
+        }
 
         self.live_auto_train_enabled = self._env_bool("MOMENTUM_AUTO_TRAIN_ENABLED", True)
         self.auto_train_every_n_iters = int(os.environ.get("MOMENTUM_AUTO_TRAIN_EVERY", "30") or "30")
@@ -248,6 +299,7 @@ class MomentumWorker:
         self.last_positions_fetch_ok = False
         self.last_entry_gate_snapshot: dict[str, Any] = {}
         self.last_exit_gate_snapshot: dict[str, Any] = {}
+        self.exit_history: deque[dict[str, Any]] = deque(maxlen=2000)
 
         self.live_train_engine: BacktestEngine | None = None
         if self.live_auto_train_enabled:
@@ -275,6 +327,15 @@ class MomentumWorker:
         if raw is None:
             return default
         return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _env_int(name: str, default: int, minimum: int = 0) -> int:
+        raw = os.environ.get(name)
+        try:
+            value = int(raw) if raw is not None else int(default)
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(int(minimum), value)
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -858,6 +919,86 @@ class MomentumWorker:
             )
         self._auto_train_last_iter = self._auto_train_iter_count
 
+    def _reason_with_side(self, reason: ExitReason | str, is_long: bool) -> str:
+        base = str(reason.value if isinstance(reason, ExitReason) else reason)
+        return base if is_long else f"{base}_short"
+
+    def _get_loss_cut_label(self, is_long: bool = True) -> str:
+        pct = max(0.0, float(self.exit_max_loss_pct) * 100.0)
+        pct_text = f"{pct:.4f}".rstrip("0").rstrip(".")
+        base = f"{ExitReason.LOSS_CUT.value}_{pct_text}pct"
+        return base if is_long else f"{base}_short"
+
+    def _record_exit_event(
+        self,
+        *,
+        symbol: str,
+        position_side: str,
+        reason: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": str(symbol),
+            "position_side": str(position_side),
+            "reason": str(reason),
+            "snapshot": dict(snapshot),
+        }
+        self.exit_history.append(event)
+
+    def _reset_hysteresis(self) -> None:
+        for key in list(self.gate_fail_counts.keys()):
+            self.gate_fail_counts[key] = 0
+        logger.info("[HYSTERESIS] counters reset")
+
+    def _evaluate_gate_hysteresis(
+        self,
+        *,
+        gate_name: str,
+        failed: bool,
+        snapshot: dict[str, Any],
+    ) -> bool:
+        threshold = max(1, int(self.gate_fail_thresholds.get(gate_name, 1)))
+        prev = int(self.gate_fail_counts.get(gate_name, 0))
+
+        if failed:
+            count = prev + 1
+            self.gate_fail_counts[gate_name] = count
+            triggered = count >= threshold
+            if not triggered:
+                logger.warning(
+                    "[HYSTERESIS] gate=%s fail %s/%s - holding",
+                    gate_name,
+                    count,
+                    threshold,
+                )
+            else:
+                logger.error(
+                    "[HYSTERESIS] gate=%s failed %s/%s ticks - exit triggered",
+                    gate_name,
+                    count,
+                    threshold,
+                )
+                self.gate_fail_counts[gate_name] = 0
+        else:
+            triggered = False
+            if prev > 0:
+                logger.info(
+                    "[HYSTERESIS] gate=%s recovered after %s failing ticks - reset",
+                    gate_name,
+                    prev,
+                )
+            self.gate_fail_counts[gate_name] = 0
+
+        hyst = snapshot.setdefault("hysteresis", {})
+        hyst[gate_name] = {
+            "threshold": threshold,
+            "count": int(self.gate_fail_counts.get(gate_name, 0)),
+            "failed": bool(failed),
+            "triggered": bool(triggered),
+        }
+        return triggered
+
     def _ensure_position_guard(self, symbol: str, side: str, entry_price: float) -> dict[str, Any]:
         guard = self.position_guards.get(symbol)
         side = str(side).lower()
@@ -897,7 +1038,6 @@ class MomentumWorker:
         guard: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
         is_long = position_side == "buy"
-        suffix = "" if is_long else "_short"
         composite_key = "composite_long" if is_long else "composite_short"
         pattern_key = "pattern_long" if is_long else "pattern_short"
         imbalance_key = "imbalance_long" if is_long else "imbalance_short"
@@ -950,23 +1090,51 @@ class MomentumWorker:
                 "opposite_imbalance_spike": opposite_imbalance > self.exit_opposite_imbalance_spike,
             },
         }
+        snapshot["hysteresis_thresholds"] = dict(self.gate_fail_thresholds)
 
         reason = ""
         if self.enforce_exit_execution_gates:
-            if loss_pct >= self.exit_max_loss_pct:
-                reason = f"loss_cut_2pct{suffix}"
-            elif confidence < self.exit_confidence_floor_pct:
-                reason = f"confidence_below_{int(self.exit_confidence_floor_pct)}{suffix}"
-            elif composite < self.exit_composite_floor:
-                reason = f"composite_below_{self.exit_composite_floor:.2f}{suffix}"
-            elif trend < self.exit_trend_floor:
-                reason = f"trend_below_{self.exit_trend_floor:.2f}{suffix}"
-            elif pattern < self.exit_pattern_floor:
-                reason = f"pattern_below_{self.exit_pattern_floor:.2f}{suffix}"
-            elif imbalance < self.exit_imbalance_floor:
-                reason = f"imbalance_below_{self.exit_imbalance_floor:.2f}{suffix}"
-            elif opposite_imbalance > self.exit_opposite_imbalance_spike:
-                reason = f"opposite_imbalance_spike{suffix}"
+            gate_checks = [
+                ("loss_cut", loss_pct >= self.exit_max_loss_pct, self._get_loss_cut_label(is_long)),
+                (
+                    "confidence",
+                    confidence < self.exit_confidence_floor_pct,
+                    self._reason_with_side(ExitReason.CONFIDENCE_FLOOR, is_long),
+                ),
+                (
+                    "composite",
+                    composite < self.exit_composite_floor,
+                    self._reason_with_side(ExitReason.COMPOSITE_FLOOR, is_long),
+                ),
+                (
+                    "trend",
+                    trend < self.exit_trend_floor,
+                    self._reason_with_side(ExitReason.TREND_FLOOR, is_long),
+                ),
+                (
+                    "pattern",
+                    pattern < self.exit_pattern_floor,
+                    self._reason_with_side(ExitReason.PATTERN_FLOOR, is_long),
+                ),
+                (
+                    "imbalance",
+                    imbalance < self.exit_imbalance_floor,
+                    self._reason_with_side(ExitReason.IMBALANCE_FLOOR, is_long),
+                ),
+                (
+                    "opposite_spike",
+                    opposite_imbalance > self.exit_opposite_imbalance_spike,
+                    self._reason_with_side(ExitReason.OPPOSITE_SPIKE, is_long),
+                ),
+            ]
+            for gate_name, failed, gate_reason in gate_checks:
+                if self._evaluate_gate_hysteresis(
+                    gate_name=gate_name,
+                    failed=bool(failed),
+                    snapshot=snapshot,
+                ):
+                    reason = gate_reason
+                    break
 
         r_value = float(guard.get("risk_r", self.exit_max_loss_pct))
         if unrealized_pct >= (1.0 * r_value):
@@ -986,37 +1154,84 @@ class MomentumWorker:
                 guard["stop_price"] = min(float(guard.get("stop_price", entry_price)), trailing)
 
         stop_price = float(guard.get("stop_price", entry_price))
-        if is_long and current_price <= stop_price:
-            reason = reason or "profit_lock_stop_hit"
-        if (not is_long) and current_price >= stop_price:
-            reason = reason or "profit_lock_stop_hit_short"
+        if not reason:
+            profit_lock_failed = (is_long and current_price <= stop_price) or ((not is_long) and current_price >= stop_price)
+            if self._evaluate_gate_hysteresis(
+                gate_name="profit_lock",
+                failed=profit_lock_failed,
+                snapshot=snapshot,
+            ):
+                reason = self._reason_with_side(ExitReason.PROFIT_LOCK, is_long)
 
-        if bool(context.get(reversal_key, False)):
-            reason = reason or (f"strong_reversal_against{'_long' if is_long else '_short'}")
+        if not reason and self._evaluate_gate_hysteresis(
+            gate_name="strong_reversal",
+            failed=bool(context.get(reversal_key, False)),
+            snapshot=snapshot,
+        ):
+            reason = self._reason_with_side(ExitReason.STRONG_REVERSAL, is_long)
 
+        time_stop_failed = False
         if bars_held >= self.exit_time_stop_bars:
             entry_momentum = abs(float(guard.get("entry_momentum", 0.0)))
             current_momentum = abs(float(context.get("momentum", 0.0)))
             if current_momentum <= (entry_momentum * 1.05):
-                reason = reason or (f"time_stop_no_momentum_expansion{suffix}")
+                time_stop_failed = True
+        if not reason and self._evaluate_gate_hysteresis(
+            gate_name="time_stop",
+            failed=time_stop_failed,
+            snapshot=snapshot,
+        ):
+            reason = self._reason_with_side(ExitReason.TIME_STOP, is_long)
 
         entry_atr = float(guard.get("entry_atr", 0.0))
         current_atr = float(context.get("atr", 0.0))
-        if entry_atr > 0 and current_atr > 0 and current_atr <= (entry_atr * self.exit_volatility_contraction):
-            reason = reason or (f"volatility_contraction_exit{suffix}")
+        volatility_contract_failed = (
+            entry_atr > 0
+            and current_atr > 0
+            and current_atr <= (entry_atr * self.exit_volatility_contraction)
+        )
+        if not reason and self._evaluate_gate_hysteresis(
+            gate_name="volatility_contract",
+            failed=volatility_contract_failed,
+            snapshot=snapshot,
+        ):
+            reason = self._reason_with_side(ExitReason.VOLATILITY_CONTRACT, is_long)
 
         vol_ma20 = float(context.get("vol_ma20", 0.0))
         vol_last = float(context.get("vol_last", 0.0))
-        if vol_ma20 > 0 and vol_last < (vol_ma20 * self.exit_liquidity_vacuum_factor):
-            reason = reason or (f"liquidity_vacuum_exit{suffix}")
+        liquidity_vacuum_failed = vol_ma20 > 0 and vol_last < (vol_ma20 * self.exit_liquidity_vacuum_factor)
+        if not reason and self._evaluate_gate_hysteresis(
+            gate_name="liquidity_vacuum",
+            failed=liquidity_vacuum_failed,
+            snapshot=snapshot,
+        ):
+            reason = self._reason_with_side(ExitReason.LIQUIDITY_VACUUM, is_long)
 
         corr = abs(float(context.get("correlation", 0.0)))
-        if corr >= self.exit_correlation_spike_abs:
-            reason = reason or (f"correlation_spike_exit{suffix}")
+        if not reason and self._evaluate_gate_hysteresis(
+            gate_name="correlation_spike",
+            failed=(corr >= self.exit_correlation_spike_abs),
+            snapshot=snapshot,
+        ):
+            reason = self._reason_with_side(ExitReason.CORRELATION_SPIKE, is_long)
 
         snapshot["stop_price_after"] = float(guard.get("stop_price", entry_price))
         snapshot["reason"] = reason
         return reason, snapshot
+
+    def _build_exit_signal(self, symbol: str, position_side: str, quantity: float, reason: str) -> dict[str, Any]:
+        close_side = "sell" if str(position_side).lower() == "buy" else "buy"
+        return {
+            "symbol": symbol,
+            "side": close_side,
+            "quantity": float(quantity),
+            "order_type": "market",
+            "order_kind": "taker",
+            "strategy_id": "momentum_exit_v1",
+            "regime": "risk_exit",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "exit_reason": str(reason),
+        }
 
     def _build_exit_signal_if_needed(self, candles: pd.DataFrame) -> dict[str, Any] | None:
         self.last_exit_gate_snapshot = {}
@@ -1055,17 +1270,18 @@ class MomentumWorker:
             self.last_exit_gate_snapshot = snapshot
 
             if reason:
-                return {
-                    "symbol": symbol,
-                    "side": ("sell" if side == "buy" else "buy"),
-                    "quantity": quantity,
-                    "order_type": "market",
-                    "order_kind": "taker",
-                    "strategy_id": "momentum_exit_v1",
-                    "regime": "risk_exit",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "exit_reason": reason,
-                }
+                self._record_exit_event(
+                    symbol=symbol,
+                    position_side=side,
+                    reason=reason,
+                    snapshot=snapshot,
+                )
+                return self._build_exit_signal(
+                    symbol=symbol,
+                    position_side=side,
+                    quantity=quantity,
+                    reason=reason,
+                )
 
         return None
 
@@ -1972,6 +2188,7 @@ class MomentumWorker:
                 # Open new position
                 self.risk_manager.open_position(local_symbol, side, signal.get("quantity", 0), avg_fill_price)
                 self._ensure_position_guard(local_symbol, side, avg_fill_price)
+                self._reset_hysteresis()
                 entry_price = avg_fill_price
                 outcome = "open"
 
