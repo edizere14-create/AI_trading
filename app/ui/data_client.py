@@ -223,6 +223,23 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _entry_gate_snapshot(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    snapshot = payload.get("last_entry_gate_snapshot")
+    if isinstance(snapshot, dict):
+        return dict(snapshot)
+    return {}
+
+
+def _entry_gate_confidence_pct(payload: Any) -> float | None:
+    snapshot = _entry_gate_snapshot(payload)
+    value = _safe_float(snapshot.get("confidence_pct"))
+    if value is None:
+        return None
+    return float(value)
+
+
 def _extract_contract_size(row: dict[str, Any]) -> float:
     info = row.get("info")
     if isinstance(info, dict):
@@ -390,6 +407,11 @@ def get_worker_status(api_url: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
 
+    last_entry_gate_snapshot = _entry_gate_snapshot(data)
+    last_exit_gate_snapshot = data.get("last_exit_gate_snapshot")
+    if not isinstance(last_exit_gate_snapshot, dict):
+        last_exit_gate_snapshot = {}
+
     def _safe_int(value: Any, default: int = 0) -> int:
         try:
             return int(value)
@@ -402,6 +424,9 @@ def get_worker_status(api_url: str) -> dict[str, Any]:
         "signal_count": _safe_int(data.get("signal_count", 0), 0),
         "execution_count": _safe_int(data.get("execution_count", 0), 0),
         "last_decision_reason": str(data.get("last_decision_reason", "") or ""),
+        "last_entry_gate_snapshot": last_entry_gate_snapshot,
+        "last_exit_gate_snapshot": dict(last_exit_gate_snapshot),
+        "entry_gate_confidence_pct": _entry_gate_confidence_pct(data),
     }
 
 
@@ -427,6 +452,10 @@ def get_metrics(api_url: str) -> dict[str, Any]:
             equity = 0.0
 
         ai = get_ai_insight(api_url)
+        worker_status = get_worker_status(api_url)
+        gate_confidence = _safe_float(
+            (worker_status.get("last_entry_gate_snapshot", {}) or {}).get("confidence_pct")
+        )
         trades = get_active_trades(api_url)
         daily_pnl = 0.0
         if not trades.empty and "unrealized_pnl" in trades.columns:
@@ -445,7 +474,9 @@ def get_metrics(api_url: str) -> dict[str, Any]:
             "total_equity": float(equity),
             "daily_pnl": float(daily_pnl),
             "ai_bias": str(ai.get("bias", "NEUTRAL")).upper(),
-            "confidence": float(ai.get("confidence", 0.0) or 0.0),
+            "confidence": float(
+                gate_confidence if gate_confidence is not None else (ai.get("confidence", 0.0) or 0.0)
+            ),
             "risk_exposure": float(exposure_pct),
         }
 
@@ -461,6 +492,7 @@ def get_metrics(api_url: str) -> dict[str, Any]:
     # Flexible extraction for current backend shape
     ai_payload = m.get("ai", m.get("analytics", {}))
     ai = ai_payload if isinstance(ai_payload, dict) else {}
+    gate_confidence = _entry_gate_confidence_pct(m)
     equity = float(r.get("account_balance", r.get("equity", 0.0)) or 0.0)
     reported_pnl = float(r.get("total_pnl", r.get("daily_pnl", 0.0)) or 0.0)
     reported_exposure_pct = float(r.get("exposure_pct", r.get("exposure", 0.0)) or 0.0)
@@ -503,7 +535,11 @@ def get_metrics(api_url: str) -> dict[str, Any]:
         "total_equity": float(equity),
         "daily_pnl": float(display_pnl),
         "ai_bias": str(ai.get("bias", m.get("bias", "NEUTRAL"))).upper(),
-        "confidence": float(ai.get("confidence", m.get("confidence", 0.0)) or 0.0),
+        "confidence": float(
+            gate_confidence
+            if gate_confidence is not None
+            else (ai.get("confidence", m.get("confidence", 0.0)) or 0.0)
+        ),
         "risk_exposure": float(display_exposure_pct),
     }
 

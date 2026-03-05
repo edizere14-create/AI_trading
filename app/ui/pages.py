@@ -347,14 +347,28 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
     except Exception:
         worker_status = {}
 
-    _metric_bar(metrics)
+    entry_gate_snapshot = (
+        worker_status.get("last_entry_gate_snapshot", {})
+        if isinstance(worker_status.get("last_entry_gate_snapshot", {}), dict)
+        else {}
+    )
+    entry_gate_conf_raw = pd.to_numeric(entry_gate_snapshot.get("confidence_pct"), errors="coerce")
+    entry_gate_confidence = float(entry_gate_conf_raw) if pd.notna(entry_gate_conf_raw) else None
+
+    ai_display: dict[str, Any] = dict(ai)
+    metrics_display: dict[str, Any] = dict(metrics)
+    if entry_gate_confidence is not None:
+        ai_display["confidence"] = entry_gate_confidence
+        metrics_display["confidence"] = entry_gate_confidence
+
+    _metric_bar(metrics_display)
 
     left, mid, right = st.columns([3.8, 1.6, 1.8])
 
     with left:
         st.subheader("Main Chart")
         st.caption(f"Live Price: ${stream.latest.price:,.2f} • {stream.latest.ts}")
-        _chart(candles, ai, stream.latest.price)
+        _chart(candles, ai_display, stream.latest.price)
 
     with mid:
         st.subheader("AI Insight Panel")
@@ -372,14 +386,16 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
         if not collateral_assets:
             collateral_assets = ["USDT"]
         collateral_total_usd = float(risk_preview.get("collateral_total_usd", 3000.0) or 3000.0)
-        confidence_value = ai.get("confidence")
+        confidence_value = ai_display.get("confidence")
         confidence_text = "N/A" if confidence_value in (None, "") else f"{float(str(confidence_value)):.2f}%"
-        vol_forecast_value = ai.get("vol_forecast")
+        vol_forecast_value = ai_display.get("vol_forecast")
         vol_forecast_text = "N/A" if vol_forecast_value in (None, "") else f"{float(str(vol_forecast_value)):.2f}"
-        pattern_summary = str(ai.get("pattern_summary") or "").strip()
+        pattern_summary = str(ai_display.get("pattern_summary") or "").strip()
         pattern_text = pattern_summary if pattern_summary else "N/A"
-        st.write(f"**Bias:** {ai.get('bias', 'N/A')}")
+        st.write(f"**Bias:** {ai_display.get('bias', 'N/A')}")
         st.write(f"**Confidence:** {confidence_text}")
+        if entry_gate_confidence is not None:
+            st.caption(f"Execution gate confidence source: worker snapshot ({entry_gate_confidence:.2f}%).")
         st.write(f"**Volatility Forecast:** {vol_forecast_text}")
         st.write(f"**Pattern Detection:** {pattern_text}")
         with st.expander("Why this trade?"):
@@ -389,7 +405,7 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
             agreement_threshold = g3.slider("Agreement Gate", min_value=0.05, max_value=1.00, value=0.30, step=0.05)
 
             reasoning = _build_trade_reasoning(
-                ai,
+                ai_display,
                 candles,
                 confidence_threshold=confidence_threshold,
                 conviction_threshold=conviction_threshold,
@@ -406,7 +422,7 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                 for item in action_items:
                     st.caption(f"• {item}")
 
-            provided_why = str(ai.get("why", "") or "").strip()
+            provided_why = str(ai_display.get("why", "") or "").strip()
             if provided_why:
                 st.markdown(f"**Model Narrative:** {provided_why}")
 
@@ -446,7 +462,7 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                 st.dataframe(styled, use_container_width=True, hide_index=True)
 
             signal_debug = {
-                "confidence_pct": float(ai.get("confidence", 0.0) or 0.0),
+                "confidence_pct": float(ai_display.get("confidence", 0.0) or 0.0),
                 "composite_score": float(abs(reasoning.get("composite", 0.0))),
                 "trend_score": float(
                     pd.to_numeric(factors_df.loc[factors_df["factor"] == "Trend (SMA20 vs SMA50)", "score"], errors="coerce")
@@ -554,6 +570,32 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
             decision_reason = str(worker_status.get("last_decision_reason", "") or "").strip()
             if decision_reason:
                 st.caption(f"Last decision: {decision_reason}")
+            if decision_reason.startswith("entry_gate_failed") and entry_gate_snapshot:
+                gate_labels = {
+                    "confidence_gate": "confidence",
+                    "conviction_gate": "conviction",
+                    "trend_gate": "trend",
+                    "vol_gate": "volatility",
+                    "pattern_gate": "pattern",
+                    "agreement_gate": "agreement",
+                    "direction_gate": "direction",
+                }
+                failed_gates = [
+                    gate_labels.get(key, key)
+                    for key, value in entry_gate_snapshot.items()
+                    if key.endswith("_gate") and isinstance(value, bool) and not value
+                ]
+                snapshot_conf = pd.to_numeric(entry_gate_snapshot.get("confidence_pct"), errors="coerce")
+                snapshot_comp = pd.to_numeric(entry_gate_snapshot.get("composite"), errors="coerce")
+                details: list[str] = []
+                if pd.notna(snapshot_conf):
+                    details.append(f"conf={float(snapshot_conf):.2f}%")
+                if pd.notna(snapshot_comp):
+                    details.append(f"composite={float(snapshot_comp):.3f}")
+                if details:
+                    st.caption(f"Entry gate snapshot: {' | '.join(details)}")
+                if failed_gates:
+                    st.caption(f"Failed gates: {', '.join(failed_gates)}")
         else:
             st.caption("Worker status unavailable.")
 
