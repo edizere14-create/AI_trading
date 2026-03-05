@@ -621,8 +621,12 @@ class MomentumWorker:
 
         trend_raw = ((sma20 / sma50) - 1.0) * 100.0 if sma50 else 0.0
         trend_score = self._clip_score(trend_raw / 0.40)
+        # Signed version preserves direction for composite calculation
+        trend_score_directional = trend_score if trend_raw >= 0 else -abs(trend_score)
         ret_10 = float((close.iloc[-1] / close.iloc[-11] - 1.0) * 100.0) if len(close) >= 11 else 0.0
         momentum_score = self._clip_score(ret_10 / 0.60)
+        # Signed version preserves direction for composite calculation
+        momentum_score_directional = momentum_score if ret_10 >= 0 else -abs(momentum_score)
 
         returns = close.pct_change().dropna()
         vol_ann = float(returns.tail(96).std() * (24 * 365) ** 0.5) if len(returns) >= 20 else 0.0
@@ -641,10 +645,10 @@ class MomentumWorker:
         agreement_score = abs(agreement_raw)
 
         composite = (
-            0.25 * trend_score
-            + 0.20 * momentum_score
+            0.25 * trend_score_directional
+            + 0.20 * momentum_score_directional
             + 0.15 * vol_score
-            + 0.10 * pattern_score
+            + 0.10 * (pattern_score if side == "buy" else -pattern_score)
             + 0.20 * self._clip_score((confidence_pct - 50.0) / 25.0)
             + 0.10 * self._clip_score(agreement_raw)
         )
@@ -654,7 +658,13 @@ class MomentumWorker:
         trend_gate = trend_score >= 0.30
         vol_gate = vol_score >= 0.0
         pattern_gate = pattern_score >= 0.25
-        agreement_gate = agreement_score >= self.entry_agreement_gate
+        # Waive agreement gate until signal history is established.
+        # On tick 1 signal_history is empty so agreement is always 0.
+        _min_history_for_agreement = 10
+        agreement_gate = (
+            len(self.signal_history) < _min_history_for_agreement
+            or agreement_score >= self.entry_agreement_gate
+        )
 
         if side == "buy":
             direction_gate = composite >= self.entry_conviction_gate
@@ -677,10 +687,13 @@ class MomentumWorker:
             "confidence_pct": confidence_pct,
             "composite": float(composite),
             "trend_score": float(trend_score),
+            "trend_score_directional": float(trend_score_directional),
+            "momentum_score_directional": float(momentum_score_directional),
             "vol_score": float(vol_score),
             "pattern_score": float(pattern_score),
             "agreement_raw": float(agreement_raw),
             "agreement_score": float(agreement_score),
+            "signal_history_len": len(self.signal_history),
             "confidence_gate": confidence_gate,
             "conviction_gate": conviction_gate,
             "trend_gate": trend_gate,
@@ -751,7 +764,13 @@ class MomentumWorker:
         up_ratio = float((close_diff > 0).mean()) if not close_diff.empty else 0.0
         down_ratio = float((close_diff < 0).mean()) if not close_diff.empty else 0.0
 
-        confidence_score = min(99.0, max(5.0, abs(trend_pct + momentum) * 25.0))
+        trend_magnitude = abs(trend_pct)
+        momentum_magnitude = abs(momentum)
+        direction_agreement = 1.0 if (trend_pct * momentum >= 0) else 0.5
+        confidence_score = min(
+            99.0,
+            max(5.0, (trend_magnitude * 10.0 + momentum_magnitude * 15.0) * direction_agreement),
+        )
         composite_long = (
             0.30 * trend_score
             + 0.30 * momentum_score
