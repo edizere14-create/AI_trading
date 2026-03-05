@@ -5,6 +5,7 @@ Combines Real-time Monitoring, Portfolio Analytics, and Signal Execution.
 from __future__ import annotations
 
 from typing import Any, cast
+from datetime import timedelta
 import base64
 import binascii
 import hmac
@@ -12,6 +13,7 @@ import os
 import time
 import requests
 
+import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -220,6 +222,216 @@ def _is_ui_only_url(url: str) -> bool:
     text = str(url or "").strip().lower()
     return any(host in text for host in UI_ONLY_HOSTS)
 
+
+def _render_confidence_chart(api_url: str) -> None:
+    """
+    Fetches confidence history from FastAPI and renders
+    a rolling calibration chart directly in the dashboard.
+    """
+    if str(api_url).strip().lower() in {"all-in-one", "direct"}:
+        st.caption("Confidence history chart is available in Backend API mode.")
+        return
+
+    try:
+        response = requests.get(
+            f"{api_url.rstrip('/')}/confidence_history",
+            params={"last_n": 200},
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+        if response.status_code != 200:
+            st.caption(f"Confidence history unavailable (HTTP {response.status_code})")
+            return
+
+        payload = response.json()
+        stats = payload.get("stats", {})
+        samples = payload.get("samples", [])
+
+    except Exception as exc:
+        st.caption(f"Confidence history fetch failed: {exc}")
+        return
+
+    if not samples:
+        st.info("No confidence samples yet — waiting for signals.")
+        return
+
+    df = pd.DataFrame(samples)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    # Keep recent window visible if the payload is large.
+    if len(df) > 500:
+        cutoff = df["timestamp"].max() - timedelta(days=7)
+        df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
+
+    # Stats row
+    if stats:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric(
+            "Gate Conf Mean",
+            f"{stats.get('gate_conf_mean', 0):.1f}%",
+        )
+        c2.metric(
+            "Display Conf Mean",
+            f"{stats.get('display_conf_mean', 0):.1f}%",
+        )
+        c3.metric(
+            "Max Divergence",
+            f"{stats.get('divergence_max', 0) * 100:.1f}%",
+        )
+        c4.metric(
+            "Pass Rate",
+            f"{stats.get('pass_rate_pct', 0):.1f}%",
+            delta="of signals",
+        )
+        c5.metric(
+            "Saturated",
+            str(stats.get("saturated_count", 0)),
+            delta="≥98% signals",
+        )
+
+    # Confidence floor reference line.
+    floor = float(
+        stats.get("confidence_floor")
+        or (samples[0].get("confidence_floor") if samples else 55.0)
+        or 55.0
+    )
+
+    # Chart 1: Gate vs display confidence.
+    st.markdown("**Gate vs Display Confidence**")
+    st.caption(
+        f"Blue = gate confidence (controls entries) | "
+        f"Orange = display confidence (shown in UI) | "
+        f"Reference floor = {floor:.0f}%"
+    )
+
+    chart_df = df.set_index("timestamp")[
+        ["gate_confidence", "display_confidence"]
+    ].rename(columns={
+        "gate_confidence": "Gate Confidence %",
+        "display_confidence": "Display Confidence %",
+    })
+    chart_df["Floor"] = floor
+    st.line_chart(chart_df, use_container_width=True)
+
+    # Pass / block annotation.
+    passed = df[df["passed_gate"] == True]
+    blocked = df[df["passed_gate"] == False]
+    total = max(len(df), 1)
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Total Signals", len(df))
+    p2.metric(
+        "Passed Gate",
+        len(passed),
+        delta=f"{len(passed) / total * 100:.1f}%",
+        delta_color="normal",
+    )
+    p3.metric(
+        "Blocked",
+        len(blocked),
+        delta=f"{len(blocked) / total * 100:.1f}%",
+        delta_color="inverse",
+    )
+
+    # Chart 2: Divergence.
+    if "divergence" in df.columns:
+        st.markdown("**Gate vs Display Divergence**")
+        st.caption("Spikes mean UI confidence and gate confidence are out of sync")
+        div_df = df.set_index("timestamp")[["divergence"]].rename(
+            columns={"divergence": "Divergence %"}
+        )
+        st.area_chart(div_df, use_container_width=True)
+
+    # Chart 3: Component scores.
+    score_cols = [c for c in [
+        "trend_score", "momentum_score",
+        "pattern_score", "vol_score",
+        "composite",
+    ] if c in df.columns]
+
+    if score_cols:
+        st.markdown("**Gate Component Scores**")
+        st.caption("All scores contribute to composite")
+        scores_df = df.set_index("timestamp")[score_cols].rename(
+            columns={c: c.replace("_score", "").title() for c in score_cols}
+        )
+        st.line_chart(scores_df, use_container_width=True)
+
+    # Chart 4: Block reason breakdown.
+    if not blocked.empty and "block_reason" in blocked.columns:
+        st.markdown("**Block Reason Breakdown**")
+        reason_counts = (
+            blocked["block_reason"]
+            .fillna("unknown")
+            .value_counts()
+            .reset_index()
+        )
+        reason_counts.columns = ["Reason", "Count"]
+        st.dataframe(
+            reason_counts,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # Calibration suggestion.
+    st.divider()
+    st.markdown("**🎯 Gate Calibration Suggestion**")
+
+    if len(df) >= 10:
+        p40 = float(df["gate_confidence"].quantile(0.40))
+        suggested = round(p40, 1)
+        pass_rate = stats.get("pass_rate_pct", 0)
+
+        col1, col2 = st.columns(2)
+        col1.metric(
+            "Current Floor",
+            f"{floor:.0f}%",
+            delta=f"Pass rate {pass_rate:.1f}%",
+            delta_color="inverse" if pass_rate < 5 else "normal",
+        )
+        col2.metric(
+            "Suggested Floor",
+            f"{suggested:.0f}%",
+            delta="40th percentile of gate conf",
+        )
+
+        if pass_rate < 2:
+            st.error(
+                f"⛔ Pass rate {pass_rate:.1f}% is critically low — "
+                f"bot is effectively not trading. "
+                f"Consider: MOMENTUM_ENTRY_CONF_GATE_PCT={suggested:.0f}"
+            )
+        elif pass_rate < 20:
+            st.warning(
+                f"⚠️ Pass rate {pass_rate:.1f}% is low. "
+                f"Suggested: MOMENTUM_ENTRY_CONF_GATE_PCT={suggested:.0f}"
+            )
+        else:
+            st.success(f"✅ Pass rate {pass_rate:.1f}% looks healthy.")
+
+        st.code(
+            f"MOMENTUM_ENTRY_CONF_GATE_PCT={suggested:.0f}",
+            language="bash",
+        )
+    else:
+        st.caption(
+            f"Need at least 10 samples for calibration suggestion "
+            f"(have {len(df)})."
+        )
+
+    # Recent signals table.
+    with st.expander("Recent signal detail", expanded=False):
+        show_cols = [c for c in [
+            "timestamp", "gate_confidence", "display_confidence",
+            "divergence", "composite", "passed_gate", "block_reason",
+            "bias", "volatility",
+        ] if c in df.columns]
+        st.dataframe(
+            df[show_cols].sort_values("timestamp", ascending=False).head(50),
+            use_container_width=True,
+            hide_index=True,
+        )
+
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
 _require_dashboard_login()
@@ -360,6 +572,102 @@ with st.sidebar.expander("Diagnostics", expanded=False):
                 st.text(response.text[:1500])
         except Exception as exc:
             st.error(f"Diagnostics request failed: {exc}")
+    elif st.button("Check /confidence_diagnostic", key="diag_confidence"):
+        try:
+            response = requests.get(
+                f"{api_url.rstrip('/')}/confidence_diagnostic",
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            payload = response.json()
+
+            col1, col2 = st.columns(2)
+            col1.metric(
+                "Gate Confidence",
+                f"{payload.get('gate_confidence', 0):.1f}%"
+            )
+            col2.metric(
+                "Confidence Floor",
+                f"{payload.get('confidence_floor', 0):.1f}%"
+            )
+
+            gate_pass = payload.get("gate_would_pass", False)
+            if gate_pass:
+                st.success("✅ Gate would PASS — entries allowed")
+            else:
+                st.error("❌ Gate would BLOCK — entries blocked")
+                st.caption(f"Reason: {payload.get('gate_reason', 'unknown')}")
+
+            st.metric(
+                "Divergence",
+                f"{payload.get('divergence', 0):.1f}%"
+            )
+            st.metric(
+                "Sandbox",
+                "Demo ✅" if payload.get("sandbox") else "Live ⚠️"
+            )
+
+            stats = payload.get("history_stats", {})
+            if stats:
+                st.caption(
+                    f"Samples: {stats.get('samples', 0)} | "
+                    f"Pass rate: {stats.get('pass_rate_pct', 0):.1f}% | "
+                    f"Max divergence: {stats.get('divergence_max', 0):.2%}"
+                )
+
+            with st.expander("Full payload"):
+                st.json(payload)
+
+        except Exception as exc:
+            st.error(f"Confidence diagnostic failed: {exc}")
+
+    elif st.button("Check /confidence_history", key="diag_confidence_history"):
+        try:
+            response = requests.get(
+                f"{api_url.rstrip('/')}/confidence_history",
+                params={"last_n": 50},
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            payload = response.json()
+            stats = payload.get("stats", {})
+            samples = payload.get("samples", [])
+
+            if stats:
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Samples", stats.get("samples", 0))
+                s2.metric("Pass Rate", f"{stats.get('pass_rate_pct', 0):.1f}%")
+                s3.metric("Gate Mean", f"{stats.get('gate_conf_mean', 0):.1f}%")
+                s4.metric("Display Mean", f"{stats.get('display_conf_mean', 0):.1f}%")
+
+            if samples:
+                df = pd.DataFrame(samples)
+                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+                df = df.sort_values("timestamp", ascending=False)
+
+                st.dataframe(
+                    df[[
+                        "timestamp", "gate_confidence",
+                        "display_confidence", "divergence",
+                        "passed_gate", "block_reason",
+                        "composite", "trend_score",
+                    ]].head(30),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                chart_df = df.sort_values("timestamp")
+                if not chart_df.empty:
+                    st.line_chart(
+                        chart_df.set_index("timestamp")[[
+                            "gate_confidence",
+                            "display_confidence",
+                        ]],
+                        use_container_width=True,
+                    )
+            else:
+                st.info("No confidence samples yet — wait for signals.")
+
+        except Exception as exc:
+            st.error(f"Confidence history failed: {exc}")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Risk Preview")
@@ -564,6 +872,13 @@ if page == "Dashboard":
             "collateral_total_usd": float(preview_collateral_total_usd),
         },
     )
+
+    st.divider()
+    with st.expander(
+        "📊 Confidence Calibration",
+        expanded=False,
+    ):
+        _render_confidence_chart(api_url)
 elif page == "Portfolio Overview":
     render_portfolio(api_url=api_url)
 else:
