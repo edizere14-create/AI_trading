@@ -508,52 +508,68 @@ class ExecutionEngine:
                     logger.error("Could not determine reference price for contract sizing")
                     return None
 
-                equity = self._resolve_equity_for_guard(signal)
-                try:
-                    contracts, _raw_contracts, notional, leverage = self._convert_and_validate_contracts(
-                        base_qty=amount,
-                        contract_size=contract_size,
-                        equity=equity,
-                        mark_price=float(ref_price),
-                        symbol=exchange_symbol,
-                        inverse=inverse,
-                    )
-                except ValueError as exc:
-                    logger.error("[ORDER BLOCKED] %s", exc)
-                    return self._blocked_result(signal, "size_guard_blocked", str(exc))
+                if inverse:
+                    contracts = max(1, int(round((amount * float(ref_price)) / contract_size)))
+                else:
+                    contracts = max(1, int(round(amount / contract_size)))
 
-                risk_manager = getattr(self, "risk_manager", None)
-                if (
-                    risk_manager is not None
-                    and hasattr(risk_manager, "pre_trade_notional_check")
-                    and callable(getattr(risk_manager, "pre_trade_notional_check"))
-                ):
-                    ok = bool(
-                        risk_manager.pre_trade_notional_check(
-                            contracts=contracts,
+                if reduce_only:
+                    logger.warning(
+                        "Reduce-only order bypassing size/leverage guards | symbol=%s side=%s contracts=%s contract_size=%s price=%s inverse=%s",
+                        exchange_symbol,
+                        side,
+                        contracts,
+                        contract_size,
+                        ref_price,
+                        inverse,
+                    )
+                else:
+                    equity = self._resolve_equity_for_guard(signal)
+                    try:
+                        contracts, _raw_contracts, notional, leverage = self._convert_and_validate_contracts(
+                            base_qty=amount,
                             contract_size=contract_size,
+                            equity=equity,
                             mark_price=float(ref_price),
                             symbol=exchange_symbol,
                             inverse=inverse,
                         )
-                    )
-                    if not ok:
-                        message = (
-                            "risk manager blocked order: pre-trade notional/leverage check failed"
+                    except ValueError as exc:
+                        logger.error("[ORDER BLOCKED] %s", exc)
+                        return self._blocked_result(signal, "size_guard_blocked", str(exc))
+
+                    risk_manager = getattr(self, "risk_manager", None)
+                    if (
+                        risk_manager is not None
+                        and hasattr(risk_manager, "pre_trade_notional_check")
+                        and callable(getattr(risk_manager, "pre_trade_notional_check"))
+                    ):
+                        ok = bool(
+                            risk_manager.pre_trade_notional_check(
+                                contracts=contracts,
+                                contract_size=contract_size,
+                                mark_price=float(ref_price),
+                                symbol=exchange_symbol,
+                                inverse=inverse,
+                            )
                         )
-                        logger.error("[ORDER BLOCKED] %s", message)
-                        return self._blocked_result(signal, "risk_manager_leverage_block", message)
-                logger.info(
-                    "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s, notional=%.2f, leverage=%.2fx)",
-                    amount,
-                    contracts,
-                    exchange_symbol,
-                    contract_size,
-                    ref_price,
-                    inverse,
-                    notional,
-                    leverage,
-                )
+                        if not ok:
+                            message = (
+                                "risk manager blocked order: pre-trade notional/leverage check failed"
+                            )
+                            logger.error("[ORDER BLOCKED] %s", message)
+                            return self._blocked_result(signal, "risk_manager_leverage_block", message)
+                    logger.info(
+                        "Converted base quantity %s to %s contracts for %s (contract_size=%s, price=%s, inverse=%s, notional=%.2f, leverage=%.2fx)",
+                        amount,
+                        contracts,
+                        exchange_symbol,
+                        contract_size,
+                        ref_price,
+                        inverse,
+                        notional,
+                        leverage,
+                    )
                 amount = float(contracts)
 
             amount = float(self.exchange.amount_to_precision(exchange_symbol, amount))

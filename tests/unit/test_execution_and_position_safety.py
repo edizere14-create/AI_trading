@@ -120,6 +120,39 @@ def test_risk_exit_orders_are_reduce_only_for_futures(monkeypatch: pytest.Monkey
     assert engine.exchange._last_amount == pytest.approx(50.0)
 
 
+def test_reduce_only_bypasses_hard_size_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "1")
+    monkeypatch.setenv("MAX_LEVERAGE_RATIO", "1.0")
+    monkeypatch.setenv("MOMENTUM_ACCOUNT_BALANCE", "100")
+
+    engine = ExecutionEngine(
+        exchange_id="krakenfutures",
+        api_key="x",
+        api_secret="y",
+        paper_mode=True,
+        sandbox=True,
+    )
+    engine.paper_mode = False
+    engine.exchange = _DummyExchange()
+    engine.max_retries = 1
+
+    result = engine.execute(
+        {
+            "symbol": "PI_XBTUSD",
+            "side": "sell",
+            "quantity": 0.001,
+            "order_kind": "taker",
+            "strategy_id": "momentum_exit_v1",
+            "regime": "risk_exit",
+        }
+    )
+
+    assert result is not None
+    assert result["status"] == "filled"
+    assert engine.exchange.last_params.get("reduceOnly") is True
+    assert engine.exchange._last_amount == pytest.approx(50.0)
+
+
 def test_reduce_only_would_not_reduce_is_treated_as_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_CONTRACTS_HARD_LIMIT", "5000")
     monkeypatch.setenv("MAX_LEVERAGE_RATIO", "100.0")
