@@ -704,7 +704,19 @@ stop_loss_pct = (
     / 100.0
 )
 preview_collateral_assets = st.sidebar.text_input("Collateral Assets", "USDT,USDC,BTC")
-preview_collateral_total_usd = st.sidebar.number_input("Collateral Total (USD)", min_value=100.0, value=3000.0, step=100.0)
+
+# Sync collateral default from live balance (once per session)
+if "collateral_synced" not in st.session_state:
+    st.session_state.collateral_synced = False
+_bal_prev = float(st.session_state.get("balance", 0.0) or 0.0)
+if not st.session_state.collateral_synced and _bal_prev > 100:
+    st.session_state.collateral_synced = True
+    st.session_state._collateral_default = round(_bal_prev, 2)
+_coll_default = float(st.session_state.get("_collateral_default", 3000.0))
+
+preview_collateral_total_usd = st.sidebar.number_input(
+    "Collateral Total (USD)", min_value=100.0, value=_coll_default, step=100.0
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Emergency Controls")
