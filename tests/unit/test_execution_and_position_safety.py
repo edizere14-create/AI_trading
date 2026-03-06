@@ -619,6 +619,65 @@ def test_entry_gate_allows_high_quality_setup(monkeypatch: pytest.MonkeyPatch) -
     assert snapshot["direction_gate"] is True
 
 
+def test_entry_gate_relaxes_thresholds_in_strong_aligned_trend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXECUTION_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONF_GATE_PCT", "55")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONVICTION_GATE", "0.35")
+    monkeypatch.setenv("MOMENTUM_ENTRY_TREND_ADAPTIVE", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_TREND_RELAX_MULTIPLIER", "0.70")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    candles = _build_trend_candles(step=25.0)
+    worker._last_context_metrics = {
+        "confidence": 45.0,
+        "pattern_long": 0.65,
+        "pattern_short": 0.05,
+    }
+
+    allowed, reason, snapshot = worker._entry_gate_allows_execution(candles, "buy")
+
+    assert allowed is True
+    assert reason == "entry_gate_pass"
+    assert snapshot["aligned_trend_regime"] == "aligned_strong"
+    assert snapshot["gate_threshold_multiplier"] == pytest.approx(0.70)
+    assert snapshot["effective_confidence_gate_pct"] < worker.entry_confidence_gate_pct
+    assert snapshot["trend_regime"] in {"high_vol", "trending", "ranging"}
+    assert snapshot["trend_threshold"] >= 0.10
+
+
+def test_entry_gate_tightens_thresholds_in_weak_trend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENFORCE_EXECUTION_GATES", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONF_GATE_PCT", "45")
+    monkeypatch.setenv("MOMENTUM_ENTRY_CONVICTION_GATE", "0.01")
+    monkeypatch.setenv("MOMENTUM_ENTRY_TREND_ADAPTIVE", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_TREND_STRICT_MULTIPLIER", "1.50")
+
+    worker = MomentumWorker(
+        symbol="PI_XBTUSD",
+        execution_engine=_MinimalExecutionEngine(paper_mode=False),  # type: ignore[arg-type]
+        data_service=object(),  # type: ignore[arg-type]
+    )
+    candles = _build_trend_candles(step=0.5)
+    worker._last_context_metrics = {
+        "confidence": 50.0,
+        "pattern_long": 0.60,
+        "pattern_short": 0.10,
+    }
+
+    allowed, reason, snapshot = worker._entry_gate_allows_execution(candles, "buy")
+
+    assert allowed is False
+    assert reason == "entry_gate_failed:confidence"
+    assert snapshot["aligned_trend_regime"] == "aligned_weak"
+    assert snapshot["gate_threshold_multiplier"] == pytest.approx(1.50)
+    assert snapshot["effective_confidence_gate_pct"] == pytest.approx(67.5)
+    assert snapshot["trend_regime"] in {"high_vol", "trending", "ranging"}
+
+
 def test_exit_gate_triggers_on_low_confidence_long(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("MOMENTUM_ENFORCE_EXIT_GATES", "true")

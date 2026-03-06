@@ -146,6 +146,8 @@ class MomentumWorker:
         default_conf_gate = "20.0" if demo_relaxed_entry_gates else "55.0"
         default_conviction_gate = "0.12" if demo_relaxed_entry_gates else "0.35"
         default_agreement_gate = "0.20" if demo_relaxed_entry_gates else "0.30"
+        default_trend_gate = "0.20" if demo_relaxed_entry_gates else "0.30"
+        default_pattern_gate = "0.20" if demo_relaxed_entry_gates else "0.25"
         entry_conf_gate_raw = os.environ.get("MOMENTUM_ENTRY_CONF_GATE_PCT")
         if entry_conf_gate_raw is None:
             entry_conf_gate_raw = os.environ.get("MOMENTUM_CONFIDENCE_GATE", default_conf_gate)
@@ -168,12 +170,67 @@ class MomentumWorker:
         except (TypeError, ValueError):
             self.entry_agreement_gate = float(default_agreement_gate)
         self.entry_agreement_gate = max(0.0, min(self.entry_agreement_gate, 1.0))
+        try:
+            self.entry_trend_gate = float(
+                os.environ.get("MOMENTUM_ENTRY_TREND_GATE", default_trend_gate) or default_trend_gate
+            )
+        except (TypeError, ValueError):
+            self.entry_trend_gate = float(default_trend_gate)
+        self.entry_trend_gate = max(0.0, min(self.entry_trend_gate, 1.0))
+        try:
+            self.entry_pattern_gate = float(
+                os.environ.get("MOMENTUM_ENTRY_PATTERN_GATE", default_pattern_gate) or default_pattern_gate
+            )
+        except (TypeError, ValueError):
+            self.entry_pattern_gate = float(default_pattern_gate)
+        self.entry_pattern_gate = max(0.0, min(self.entry_pattern_gate, 1.0))
+        self.entry_trend_adaptive = self._env_bool("MOMENTUM_ENTRY_TREND_ADAPTIVE", True)
+        try:
+            self.entry_trend_strong_threshold = float(
+                os.environ.get("MOMENTUM_ENTRY_TREND_STRONG_THRESHOLD", "0.60") or "0.60"
+            )
+        except (TypeError, ValueError):
+            self.entry_trend_strong_threshold = 0.60
+        self.entry_trend_strong_threshold = max(0.0, min(self.entry_trend_strong_threshold, 1.0))
+        try:
+            self.entry_trend_weak_threshold = float(
+                os.environ.get("MOMENTUM_ENTRY_TREND_WEAK_THRESHOLD", "0.20") or "0.20"
+            )
+        except (TypeError, ValueError):
+            self.entry_trend_weak_threshold = 0.20
+        self.entry_trend_weak_threshold = max(0.0, min(self.entry_trend_weak_threshold, 1.0))
+        try:
+            self.entry_trend_relax_multiplier = float(
+                os.environ.get("MOMENTUM_ENTRY_TREND_RELAX_MULTIPLIER", "0.75") or "0.75"
+            )
+        except (TypeError, ValueError):
+            self.entry_trend_relax_multiplier = 0.75
+        self.entry_trend_relax_multiplier = max(0.50, min(self.entry_trend_relax_multiplier, 1.0))
+        try:
+            self.entry_trend_strict_multiplier = float(
+                os.environ.get("MOMENTUM_ENTRY_TREND_STRICT_MULTIPLIER", "1.25") or "1.25"
+            )
+        except (TypeError, ValueError):
+            self.entry_trend_strict_multiplier = 1.25
+        self.entry_trend_strict_multiplier = max(1.0, min(self.entry_trend_strict_multiplier, 2.0))
+        self.entry_block_countertrend = self._env_bool("MOMENTUM_ENTRY_BLOCK_COUNTERTREND", True)
         logger.info(
-            "Entry gates configured | conf>=%.2f conviction>=%.2f agreement>=%.2f demo_relaxed=%s",
+            "Entry gates configured | conf>=%.2f conviction>=%.2f trend>=%.2f pattern>=%.2f agreement>=%.2f demo_relaxed=%s",
             self.entry_confidence_gate_pct,
             self.entry_conviction_gate,
+            self.entry_trend_gate,
+            self.entry_pattern_gate,
             self.entry_agreement_gate,
             demo_relaxed_entry_gates,
+        )
+        logger.info(
+            "Entry trend-adaptive gates | enabled=%s strong>=%.2f weak<=%.2f relax=%.2f strict=%.2f block_countertrend=%s",
+            self.entry_trend_adaptive,
+            self.entry_trend_strong_threshold,
+            self.entry_trend_weak_threshold,
+            self.entry_trend_relax_multiplier,
+            self.entry_trend_strict_multiplier,
+            self.entry_block_countertrend,
         )
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
@@ -315,6 +372,7 @@ class MomentumWorker:
         self.last_positions_fetch_ok = False
         self.last_entry_gate_snapshot: dict[str, Any] = {}
         self.last_exit_gate_snapshot: dict[str, Any] = {}
+        self._trend_score_history: deque[float] = deque(maxlen=50)
         self.exit_history: deque[dict[str, Any]] = deque(maxlen=2000)
 
         self.live_train_engine: BacktestEngine | None = None
@@ -669,23 +727,64 @@ class MomentumWorker:
             + 0.10 * self._clip_score(agreement_raw)
         )
 
-        confidence_gate = confidence_pct >= self.entry_confidence_gate_pct
-        conviction_gate = abs(composite) >= self.entry_conviction_gate
-        trend_gate = trend_score >= 0.30
+        side_sign = 1.0 if side == "buy" else -1.0
+        aligned_trend_score = side_sign * trend_score_directional
+        trend_regime = "aligned_normal"
+        if aligned_trend_score < 0.0:
+            trend_regime = "misaligned"
+        elif aligned_trend_score >= self.entry_trend_strong_threshold:
+            trend_regime = "aligned_strong"
+        elif aligned_trend_score <= self.entry_trend_weak_threshold:
+            trend_regime = "aligned_weak"
+
+        threshold_mult = 1.0
+        if self.entry_trend_adaptive:
+            if trend_regime == "aligned_strong":
+                threshold_mult = self.entry_trend_relax_multiplier
+            elif trend_regime in {"aligned_weak", "misaligned"}:
+                threshold_mult = self.entry_trend_strict_multiplier
+
+        effective_confidence_gate_pct = max(0.0, min(100.0, self.entry_confidence_gate_pct * threshold_mult))
+        effective_conviction_gate = max(0.0, min(1.0, self.entry_conviction_gate * threshold_mult))
+        effective_pattern_gate = max(0.0, min(1.0, self.entry_pattern_gate * threshold_mult))
+        effective_agreement_gate = max(0.0, min(1.0, self.entry_agreement_gate * threshold_mult))
+
+        # Record absolute trend strength for rolling percentile thresholding.
+        self._trend_score_history.append(abs(trend_score))
+        if vol_ann > 0.60:
+            _trend_regime = "high_vol"
+        elif vol_ann > 0.30:
+            _trend_regime = "trending"
+        else:
+            _trend_regime = "ranging"
+        _regime_base = {"high_vol": 0.10, "trending": 0.20, "ranging": 0.30}[_trend_regime]
+        if len(self._trend_score_history) >= 10:
+            _sorted = sorted(self._trend_score_history)
+            _p50 = _sorted[len(_sorted) // 2]
+            _dynamic_threshold = min(_regime_base, max(0.10, _p50 * 0.80))
+        else:
+            _dynamic_threshold = _regime_base
+
+        confidence_gate = confidence_pct >= effective_confidence_gate_pct
+        conviction_gate = abs(composite) >= effective_conviction_gate
+        trend_gate = abs(trend_score) >= _dynamic_threshold
         vol_gate = vol_score >= 0.0
-        pattern_gate = pattern_score >= 0.25
+        pattern_gate = pattern_score >= effective_pattern_gate
         # Waive agreement gate until signal history is established.
         # On tick 1 signal_history is empty so agreement is always 0.
         _min_history_for_agreement = 10
         agreement_gate = (
             len(self.signal_history) < _min_history_for_agreement
-            or agreement_score >= self.entry_agreement_gate
+            or agreement_score >= effective_agreement_gate
         )
 
+        countertrend_blocked = bool(self.entry_block_countertrend and aligned_trend_score < 0.0)
         if side == "buy":
-            direction_gate = composite >= self.entry_conviction_gate
+            direction_gate = composite >= effective_conviction_gate
         else:
-            direction_gate = composite <= -self.entry_conviction_gate
+            direction_gate = composite <= -effective_conviction_gate
+        if countertrend_blocked:
+            direction_gate = False
 
         allowed = (
             confidence_gate
@@ -707,6 +806,19 @@ class MomentumWorker:
             "momentum_score_directional": float(momentum_score_directional),
             "vol_score": float(vol_score),
             "pattern_score": float(pattern_score),
+            "trend_regime": _trend_regime,
+            "aligned_trend_regime": trend_regime,
+            "aligned_trend_score": float(aligned_trend_score),
+            "countertrend_blocked": bool(countertrend_blocked),
+            "gate_threshold_multiplier": float(threshold_mult),
+            "trend_gate_threshold": float(self.entry_trend_gate),
+            "trend_threshold": round(float(_dynamic_threshold), 4),
+            "effective_confidence_gate_pct": float(effective_confidence_gate_pct),
+            "effective_conviction_gate": float(effective_conviction_gate),
+            "effective_trend_gate": float(_dynamic_threshold),
+            "effective_pattern_gate": float(effective_pattern_gate),
+            "effective_agreement_gate": float(effective_agreement_gate),
+            "pattern_gate_threshold": float(self.entry_pattern_gate),
             "agreement_raw": float(agreement_raw),
             "agreement_score": float(agreement_score),
             "signal_history_len": len(self.signal_history),
@@ -734,6 +846,8 @@ class MomentumWorker:
             return False, "entry_gate_failed:pattern", snapshot
         if not agreement_gate:
             return False, "entry_gate_failed:agreement", snapshot
+        if countertrend_blocked:
+            return False, "entry_gate_failed:countertrend", snapshot
         if not direction_gate:
             return False, "entry_gate_failed:direction", snapshot
         return False, "entry_gate_failed:unknown", snapshot
