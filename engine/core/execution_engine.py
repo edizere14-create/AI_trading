@@ -765,9 +765,15 @@ class ExecutionEngine:
                 logger.error("Live execution requested but exchange client is not initialized")
                 return None
 
-            exchange_symbol = self._resolve_exchange_symbol(symbol)
-            if exchange_symbol != symbol:
-                logger.info("Resolved execution symbol %s -> %s", symbol, exchange_symbol)
+            # Honor pre-resolved exchange symbol (e.g., from position sync)
+            pre_resolved = signal.get("exchange_symbol")
+            if pre_resolved and isinstance(pre_resolved, str) and pre_resolved.strip():
+                exchange_symbol = pre_resolved.strip()
+                logger.info("Using pre-resolved exchange symbol %s (signal.symbol=%s)", exchange_symbol, symbol)
+            else:
+                exchange_symbol = self._resolve_exchange_symbol(symbol)
+                if exchange_symbol != symbol:
+                    logger.info("Resolved execution symbol %s -> %s", symbol, exchange_symbol)
 
             if order_type == "limit" and price is None:
                 logger.error("Limit (maker) order requires price")

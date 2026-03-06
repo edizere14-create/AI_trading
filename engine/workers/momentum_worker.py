@@ -1820,9 +1820,16 @@ class MomentumWorker:
         snapshot["reason"] = reason
         return reason, snapshot
 
-    def _build_exit_signal(self, symbol: str, position_side: str, quantity: float, reason: str) -> dict[str, Any]:
+    def _build_exit_signal(
+        self,
+        symbol: str,
+        position_side: str,
+        quantity: float,
+        reason: str,
+        exchange_symbol: str | None = None,
+    ) -> dict[str, Any]:
         close_side = "sell" if str(position_side).lower() == "buy" else "buy"
-        return {
+        sig: dict[str, Any] = {
             "symbol": symbol,
             "side": close_side,
             "quantity": float(quantity),
@@ -1833,6 +1840,10 @@ class MomentumWorker:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "exit_reason": str(reason),
         }
+        # Pass through exchange symbol so execution engine uses the correct market
+        if exchange_symbol:
+            sig["exchange_symbol"] = exchange_symbol
+        return sig
 
     def _build_exit_signal_if_needed(self, candles: pd.DataFrame) -> dict[str, Any] | None:
         self.last_exit_gate_snapshot = {}
@@ -1881,11 +1892,17 @@ class MomentumWorker:
                     reason=reason,
                     snapshot=snapshot,
                 )
+                # Use the actual exchange symbol to avoid inverse/linear mismatch
+                actual_exchange_symbol = (
+                    pos.get("exchange_symbol")
+                    or self.exchange_position_cache.get(symbol, {}).get("symbol")
+                )
                 return self._build_exit_signal(
                     symbol=symbol,
                     position_side=side,
                     quantity=quantity,
                     reason=reason,
+                    exchange_symbol=actual_exchange_symbol,
                 )
 
         return None
@@ -2491,14 +2508,17 @@ class MomentumWorker:
                     float(row["quantity"]),
                     float(row["entry_price"]),
                 )
+                # Store the actual exchange symbol so exits resolve correctly
+                self.risk_manager.positions[local_symbol]["exchange_symbol"] = exchange_symbol
                 self._ensure_position_guard(
                     symbol=local_symbol,
                     side=str(row["side"]),
                     entry_price=float(row["entry_price"]),
                 )
                 logger.info(
-                    "Synced exchange open | symbol=%s side=%s qty=%.6f entry=%.2f",
+                    "Synced exchange open | symbol=%s exchange=%s side=%s qty=%.6f entry=%.2f",
                     local_symbol,
+                    exchange_symbol,
                     row["side"],
                     float(row["quantity"]),
                     float(row["entry_price"]),
@@ -2509,6 +2529,8 @@ class MomentumWorker:
                 local_pos["side"] = row["side"]
                 local_pos["quantity"] = float(row["quantity"])
                 local_pos["entry_price"] = float(row["entry_price"])
+                # Preserve the actual exchange symbol
+                local_pos["exchange_symbol"] = exchange_symbol
                 # Update mark price for unrealized PnL tracking
                 mark = float(row.get("mark_price", 0.0) or 0.0)
                 if mark > 0:
@@ -3213,7 +3235,13 @@ class MomentumWorker:
             if qty <= 0:
                 continue
 
-            signal = {
+            # Use actual exchange symbol to avoid inverse/linear mismatch
+            actual_exchange_symbol = (
+                pos.get("exchange_symbol")
+                or self.exchange_position_cache.get(symbol, {}).get("symbol")
+            )
+
+            signal: dict[str, Any] = {
                 "symbol": symbol,
                 "side": close_side,
                 "quantity": qty,
@@ -3221,6 +3249,8 @@ class MomentumWorker:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "strategy_id": "manual_close",
             }
+            if actual_exchange_symbol:
+                signal["exchange_symbol"] = actual_exchange_symbol
 
             result = self.execution_engine.execute(signal)
             order_record, trade_record = self._build_order_record(signal, result)
