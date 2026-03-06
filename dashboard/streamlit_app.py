@@ -623,8 +623,8 @@ with st.sidebar.expander("Diagnostics", expanded=False):
                     f"Max divergence: {stats.get('divergence_max', 0):.2%}"
                 )
 
-            with st.expander("Full payload"):
-                st.json(payload)
+            st.markdown("**Full payload**")
+            st.json(payload)
 
         except Exception as exc:
             st.error(f"Confidence diagnostic failed ({effective_url}): {exc}")
