@@ -424,18 +424,18 @@ def _render_confidence_chart(api_url: str) -> None:
             f"(have {len(df)})."
         )
 
-    # Recent signals table.
-    with st.expander("Recent signal detail", expanded=False):
-        show_cols = [c for c in [
-            "timestamp", "gate_confidence", "display_confidence",
-            "divergence", "composite", "passed_gate", "block_reason",
-            "bias", "volatility",
-        ] if c in df.columns]
-        st.dataframe(
-            df[show_cols].sort_values("timestamp", ascending=False).head(50),
-            use_container_width=True,
-            hide_index=True,
-        )
+    # Recent signals table (avoid nested expanders).
+    st.markdown("**Recent signal detail**")
+    show_cols = [c for c in [
+        "timestamp", "gate_confidence", "display_confidence",
+        "divergence", "composite", "passed_gate", "block_reason",
+        "bias", "volatility",
+    ] if c in df.columns]
+    st.dataframe(
+        df[show_cols].sort_values("timestamp", ascending=False).head(50),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 st.set_page_config(page_title="AI Trading Terminal", layout="wide", initial_sidebar_state="collapsed")
 apply_theme()
