@@ -655,6 +655,10 @@ class ExecutionEngine:
             return raw
 
         upper = raw.upper()
+        by_id_symbol = self._market_symbol_by_id(raw)
+        if by_id_symbol:
+            return by_id_symbol
+
         static_aliases = {
             "PI_XBTUSD": "BTC/USD:USD",
             "PF_XBTUSD": "BTC/USD:USD",
@@ -670,10 +674,6 @@ class ExecutionEngine:
         alias = static_aliases.get(upper)
         if alias and alias in markets:
             return alias
-
-        by_id_symbol = self._market_symbol_by_id(raw)
-        if by_id_symbol:
-            return by_id_symbol
 
         if upper.startswith("PI_"):
             by_id_symbol = self._market_symbol_by_id(upper.replace("PI_", "PF_", 1))
