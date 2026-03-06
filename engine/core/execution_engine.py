@@ -642,6 +642,13 @@ class ExecutionEngine:
                     return str(symbol)
         return None
 
+    @staticmethod
+    def _first_existing_market(candidates: list[str], markets: dict[str, Any]) -> str | None:
+        for candidate in candidates:
+            if candidate in markets:
+                return candidate
+        return None
+
     def _resolve_exchange_symbol(self, symbol: str) -> str:
         if self.exchange is None:
             return symbol
@@ -660,20 +667,22 @@ class ExecutionEngine:
             return by_id_symbol
 
         static_aliases = {
-            "PI_XBTUSD": "BTC/USD:USD",
-            "PF_XBTUSD": "BTC/USD:USD",
-            "PI_ETHUSD": "ETH/USD:USD",
-            "PF_ETHUSD": "ETH/USD:USD",
-            "PI_SOLUSD": "SOL/USD:USD",
-            "PF_SOLUSD": "SOL/USD:USD",
-            "XBTUSD": "BTC/USD:USD",
-            "BTCUSD": "BTC/USD:USD",
-            "ETHUSD": "ETH/USD:USD",
-            "SOLUSD": "SOL/USD:USD",
+            "PI_XBTUSD": ["BTC/USD:BTC", "BTC/USD:USD", "BTC/USD:USDT"],
+            "PF_XBTUSD": ["BTC/USD:USD", "BTC/USD:USDT", "BTC/USD:BTC"],
+            "PI_ETHUSD": ["ETH/USD:BTC", "ETH/USD:USD", "ETH/USD:USDT"],
+            "PF_ETHUSD": ["ETH/USD:USD", "ETH/USD:USDT", "ETH/USD:BTC"],
+            "PI_SOLUSD": ["SOL/USD:BTC", "SOL/USD:USD", "SOL/USD:USDT"],
+            "PF_SOLUSD": ["SOL/USD:USD", "SOL/USD:USDT", "SOL/USD:BTC"],
+            "XBTUSD": ["BTC/USD:USD", "BTC/USD:BTC", "BTC/USD:USDT"],
+            "BTCUSD": ["BTC/USD:USD", "BTC/USD:BTC", "BTC/USD:USDT"],
+            "ETHUSD": ["ETH/USD:USD", "ETH/USD:USDT", "ETH/USD:BTC"],
+            "SOLUSD": ["SOL/USD:USD", "SOL/USD:USDT", "SOL/USD:BTC"],
         }
         alias = static_aliases.get(upper)
-        if alias and alias in markets:
-            return alias
+        if alias:
+            resolved = self._first_existing_market(alias, markets)
+            if resolved:
+                return resolved
 
         if upper.startswith("PI_"):
             by_id_symbol = self._market_symbol_by_id(upper.replace("PI_", "PF_", 1))
