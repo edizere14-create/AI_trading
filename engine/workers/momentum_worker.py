@@ -1651,17 +1651,63 @@ class MomentumWorker:
             inverse = bool(self.execution_engine._is_inverse_market(sym))
             return contract_size if inverse else (contract_size * float(reference_price))
 
+        def _related_symbol_candidates(primary_symbol: str) -> list[str]:
+            candidates: list[str] = [primary_symbol]
+
+            upper = primary_symbol.upper()
+            if upper.startswith("PF_"):
+                candidates.append(primary_symbol.replace("PF_", "PI_", 1))
+            elif upper.startswith("PI_"):
+                candidates.append(primary_symbol.replace("PI_", "PF_", 1))
+
+            exchange = getattr(self.execution_engine, "exchange", None)
+            if exchange is not None:
+                markets = getattr(exchange, "markets", None) or {}
+                if markets:
+                    resolved = None
+                    try:
+                        resolved = self.execution_engine._resolve_exchange_symbol(primary_symbol)
+                    except Exception:
+                        resolved = None
+
+                    market = None
+                    if resolved and resolved in markets:
+                        market = markets.get(resolved)
+                    elif primary_symbol in markets:
+                        market = markets.get(primary_symbol)
+
+                    if isinstance(market, dict):
+                        base = str(market.get("base") or "")
+                        quote = str(market.get("quote") or "")
+                        if base and quote:
+                            for m in markets.values():
+                                if not isinstance(m, dict):
+                                    continue
+                                if not bool(m.get("contract")):
+                                    continue
+                                if str(m.get("base") or "") != base:
+                                    continue
+                                if str(m.get("quote") or "") != quote:
+                                    continue
+                                alt_symbol = str(m.get("symbol") or "").strip()
+                                if alt_symbol:
+                                    candidates.append(alt_symbol)
+
+            dedup: list[str] = []
+            seen: set[str] = set()
+            for c in candidates:
+                key = str(c or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                dedup.append(key)
+            return dedup
+
         min_contract_notional = _min_contract_notional(symbol)
         chosen_symbol = symbol
 
         if desired_notional < min_contract_notional:
-            candidates = [symbol]
-            upper = symbol.upper()
-            if upper.startswith("PF_"):
-                candidates.append(symbol.replace("PF_", "PI_", 1))
-            elif upper.startswith("PI_"):
-                candidates.append(symbol.replace("PI_", "PF_", 1))
-
+            candidates = _related_symbol_candidates(symbol)
             for candidate in candidates[1:]:
                 candidate_min_notional = _min_contract_notional(candidate)
                 if desired_notional >= candidate_min_notional:
