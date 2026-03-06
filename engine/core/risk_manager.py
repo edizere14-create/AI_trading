@@ -197,7 +197,8 @@ class RiskManager:
         if not can_trade_now:
             return False, reason
 
-        if self._drawdown_pct() >= self.max_drawdown_pct:
+        # Check both realized and mark-to-market drawdown
+        if self._drawdown_pct() >= self.max_drawdown_pct or self._equity_drawdown_pct() >= self.max_drawdown_pct:
             self._activate_kill_switch("max drawdown exceeded")
             return False, "max drawdown exceeded"
 
@@ -273,7 +274,7 @@ class RiskManager:
         }
         logger.info("Position opened | %s %s qty=%s price=%s", symbol, side, quantity, price)
 
-    def close_position(self, symbol: str, exit_price: float) -> float:
+    def close_position(self, symbol: str, exit_price: float, fees: float = 0.0) -> float:
         pos = self.positions.get(symbol)
         if not pos:
             return 0.0
@@ -282,25 +283,68 @@ class RiskManager:
         entry = float(pos["entry_price"])
         side = str(pos["side"]).lower()
         exit_price = float(exit_price)
+        fees = abs(float(fees or 0.0))
 
-        pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
+        gross_pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
+        net_pnl = gross_pnl - fees
 
-        self.account_balance += pnl
-        self.realized_pnl_total += pnl
+        self.account_balance += net_pnl
+        self.realized_pnl_total += net_pnl
         self.total_pnl = self.realized_pnl_total  # keep legacy alias in sync
-        self.daily_realized_pnl += pnl
+        self.daily_realized_pnl += net_pnl
         self.daily_pnl = self.daily_realized_pnl  # keep legacy alias in sync
         self.daily_trade_count += 1
-        if pnl > 0:
+        if net_pnl > 0:
             self.daily_win_count += 1
-            self.daily_gross_profit += pnl
-        elif pnl < 0:
-            self.daily_gross_loss += abs(pnl)
+            self.daily_gross_profit += net_pnl
+        elif net_pnl < 0:
+            self.daily_gross_loss += abs(net_pnl)
         self.peak_balance = max(self.peak_balance, self.account_balance)
 
         del self.positions[symbol]
-        logger.info("Position closed | %s pnl=%.2f balance=%.2f", symbol, pnl, self.account_balance)
-        return pnl
+        logger.info(
+            "Position closed | %s gross_pnl=%.4f fees=%.4f net_pnl=%.4f balance=%.2f",
+            symbol, gross_pnl, fees, net_pnl, self.account_balance,
+        )
+        return net_pnl
+
+    # ------------------------------------------------------------------
+    # Unrealized PnL & mark-to-market
+    # ------------------------------------------------------------------
+
+    def update_mark_price(self, symbol: str, mark_price: float) -> None:
+        """Update the live mark price for an open position."""
+        pos = self.positions.get(symbol)
+        if pos:
+            pos["mark_price"] = float(mark_price)
+
+    def get_position_unrealized_pnl(self, symbol: str) -> float:
+        """Compute unrealized PnL for a single open position."""
+        pos = self.positions.get(symbol)
+        if not pos:
+            return 0.0
+        qty = float(pos.get("quantity", 0.0))
+        entry = float(pos.get("entry_price", 0.0))
+        mark = float(pos.get("mark_price", entry))
+        side = str(pos.get("side", "buy")).lower()
+        if side == "buy":
+            return (mark - entry) * qty
+        return (entry - mark) * qty
+
+    def get_total_unrealized_pnl(self) -> float:
+        """Sum unrealized PnL across all open positions."""
+        return sum(self.get_position_unrealized_pnl(s) for s in self.positions)
+
+    def get_equity(self) -> float:
+        """Account balance + total unrealized PnL (mark-to-market equity)."""
+        return self.account_balance + self.get_total_unrealized_pnl()
+
+    def _equity_drawdown_pct(self) -> float:
+        """Drawdown based on mark-to-market equity (includes unrealized)."""
+        equity = self.get_equity()
+        if self.peak_balance <= 0:
+            return 0.0
+        return max(0.0, (self.peak_balance - equity) / self.peak_balance)
 
     def get_risk_metrics(self) -> dict[str, Any]:
         self._reset_daily_if_needed()
@@ -321,12 +365,18 @@ class RiskManager:
             else 0.0
         )
 
+        unrealized = self.get_total_unrealized_pnl()
+        equity = self.get_equity()
+        equity_dd = self._equity_drawdown_pct()
+
         return {
             "account_balance": round(self.account_balance, 2),
             "current_balance": round(self.account_balance, 2),
+            "equity": round(equity, 2),
             "start_of_day_balance": round(self.start_of_day_balance, 2),
             "total_pnl": round(self.total_pnl, 2),
             "total_realized_pnl": round(self.realized_pnl_total, 2),
+            "unrealized_pnl": round(unrealized, 4),
             "daily_pnl": round(self.daily_realized_pnl, 2),
             "daily_realized_pnl": round(self.daily_realized_pnl, 2),
             "daily_pnl_percent": round(daily_pnl_percent, 4),
@@ -343,6 +393,7 @@ class RiskManager:
             "max_leverage_ratio": round(self.max_leverage_ratio, 4),
             "normalized_daily_pnl_per_1k": round(normalized_daily_pnl_per_1k, 4),
             "drawdown_pct": round(self._drawdown_pct() * 100, 2),
+            "equity_drawdown_pct": round(equity_dd * 100, 2),
             "open_positions": len(self.positions),
             "max_concurrent_positions": self.max_concurrent_positions,
             "kill_switch_active": self.kill_switch_active,
@@ -354,6 +405,8 @@ class RiskManager:
         metrics = self.get_risk_metrics()
         return {
             "account_balance": metrics.get("account_balance", self.account_balance),
+            "equity": metrics.get("equity", self.account_balance),
+            "unrealized_pnl": metrics.get("unrealized_pnl", 0.0),
             "daily_loss": metrics.get("daily_loss", 0.0),
             "daily_pnl": metrics.get("daily_pnl", 0.0),
             "daily_realized_pnl": metrics.get("daily_realized_pnl", 0.0),
@@ -361,6 +414,7 @@ class RiskManager:
             "win_rate": metrics.get("win_rate", 0.0),
             "profit_factor": metrics.get("profit_factor"),
             "drawdown_pct": metrics.get("drawdown_pct", 0.0),
+            "equity_drawdown_pct": metrics.get("equity_drawdown_pct", 0.0),
             "open_positions": metrics.get("open_positions", len(self.positions)),
             "kill_switch_active": metrics.get("kill_switch_active", False),
             "kill_switch_reason": metrics.get("kill_switch_reason", ""),

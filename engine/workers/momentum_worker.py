@@ -1446,6 +1446,10 @@ class MomentumWorker:
             if entry_price <= 0 or quantity <= 0:
                 continue
 
+            # Update mark price for unrealized PnL during hold
+            if current_price > 0:
+                self.risk_manager.update_mark_price(symbol, current_price)
+
             guard = self._ensure_position_guard(symbol, side, entry_price)
             guard["highest_price"] = max(float(guard.get("highest_price", entry_price)), current_price)
             guard["lowest_price"] = min(float(guard.get("lowest_price", entry_price)), current_price)
@@ -2062,7 +2066,7 @@ class MomentumWorker:
                     0.0,
                 )
             if exit_price > 0:
-                pnl = self.risk_manager.close_position(local_symbol, float(exit_price))
+                pnl = self.risk_manager.close_position(local_symbol, float(exit_price), fees=0.0)
                 logger.info("Synced exchange close | symbol=%s exit=%.2f pnl=%.4f", local_symbol, exit_price, pnl)
                 self.position_guards.pop(local_symbol, None)
 
@@ -2096,6 +2100,10 @@ class MomentumWorker:
                 local_pos["side"] = row["side"]
                 local_pos["quantity"] = float(row["quantity"])
                 local_pos["entry_price"] = float(row["entry_price"])
+                # Update mark price for unrealized PnL tracking
+                mark = float(row.get("mark_price", 0.0) or 0.0)
+                if mark > 0:
+                    self.risk_manager.update_mark_price(local_symbol, mark)
                 if prev_quantity > 0 and float(row["quantity"]) > (prev_quantity * 10.0):
                     logger.warning(
                         "Synced position quantity jump | symbol=%s prev=%.8f new=%.8f contracts=%s",
@@ -2596,17 +2604,22 @@ class MomentumWorker:
                 # Close: opposite side of position
                 if (pos_side == "buy" and side == "sell") or (pos_side == "sell" and side == "buy"):
                     entry_price = float(pos.get("entry_price", 0.0))
-                    size = float(signal.get("quantity", 0))
+                    # Use position quantity (authoritative) not signal quantity
+                    size = float(pos.get("quantity", 0.0) or signal.get("quantity", 0))
                     exit_price = avg_fill_price
                     
                     if pos_side == "buy":
-                        pnl = (exit_price - entry_price) * size
+                        gross_pnl = (exit_price - entry_price) * size
                     else:
-                        pnl = (entry_price - exit_price) * size
+                        gross_pnl = (entry_price - exit_price) * size
 
-                    outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
+                    net_pnl = gross_pnl - abs(float(fees or 0.0))
+                    pnl = net_pnl
 
-                    self.risk_manager.close_position(local_symbol, exit_price)
+                    outcome = "win" if net_pnl > 0 else ("loss" if net_pnl < 0 else "flat")
+
+                    # Pass fees so risk manager deducts them from balance
+                    self.risk_manager.close_position(local_symbol, exit_price, fees=abs(float(fees or 0.0)))
                     self.position_guards.pop(local_symbol, None)
 
                     trade_record = {
@@ -2616,7 +2629,8 @@ class MomentumWorker:
                         "size": size,
                         "entry_price": entry_price,
                         "exit_price": exit_price,
-                        "pnl": pnl,
+                        "gross_pnl": gross_pnl,
+                        "pnl": net_pnl,
                         "fees": fees,
                         "slippage": slippage,
                         "regime": regime,
@@ -2663,7 +2677,11 @@ class MomentumWorker:
 
     def get_analytics(self) -> dict[str, Any]:
         trades = [t for t in self.trade_history if t.get("pnl") is not None]
+        # net PnL (after fees) — this is the authoritative metric
         pnls = [float(t["pnl"]) for t in trades]
+        # gross PnL for reference
+        gross_pnls = [float(t.get("gross_pnl", t["pnl"])) for t in trades]
+        total_fees = sum(abs(float(t.get("fees") or 0.0)) for t in trades)
         total_trades = len(pnls)
 
         wins = [p for p in pnls if p > 0]
@@ -2677,6 +2695,10 @@ class MomentumWorker:
         best_trade = max(pnls) if pnls else 0.0
         worst_trade = min(pnls) if pnls else 0.0
         session_pnl = sum(pnls) if pnls else 0.0
+        session_gross_pnl = sum(gross_pnls) if gross_pnls else 0.0
+
+        # Unrealized PnL from open positions
+        unrealized_pnl = self.risk_manager.get_total_unrealized_pnl()
 
         return {
             "total_trades": total_trades,
@@ -2688,6 +2710,10 @@ class MomentumWorker:
             "best_trade": round(best_trade, 4),
             "worst_trade": round(worst_trade, 4),
             "session_pnl": round(session_pnl, 4),
+            "session_gross_pnl": round(session_gross_pnl, 4),
+            "total_fees": round(total_fees, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "equity": round(self.risk_manager.get_equity(), 2),
             "trades": trades,
         }
 
