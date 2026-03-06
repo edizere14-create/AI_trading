@@ -267,6 +267,72 @@ class MomentumWorker:
             self.entry_auto_size_min_qty,
             self.entry_auto_size_max_qty,
         )
+        # --- Partial fill reconciliation ---
+        self.reconcile_partial_fills = self._env_bool("MOMENTUM_RECONCILE_PARTIAL_FILLS", True)
+        try:
+            self.partial_fill_poll_sec = float(os.environ.get("MOMENTUM_PARTIAL_FILL_POLL_SEC", "30") or "30")
+        except (TypeError, ValueError):
+            self.partial_fill_poll_sec = 30.0
+        self.partial_fill_poll_sec = max(5.0, self.partial_fill_poll_sec)
+        self._pending_fill_orders: dict[str, dict[str, Any]] = {}  # order_id -> {symbol, side, expected_qty, filled_qty, placed_at}
+
+        # --- Watchdog / stale restart ---
+        self.watchdog_enabled = self._env_bool("MOMENTUM_WATCHDOG_ENABLED", True)
+        try:
+            self.watchdog_max_stale_sec = float(os.environ.get("MOMENTUM_WATCHDOG_MAX_STALE_SEC", "300") or "300")
+        except (TypeError, ValueError):
+            self.watchdog_max_stale_sec = 300.0
+        self.watchdog_max_stale_sec = max(60.0, self.watchdog_max_stale_sec)
+        self._last_iteration_ts: float = 0.0
+        self._watchdog_restart_count: int = 0
+
+        # --- Multi-timeframe HTF confirmation ---
+        self.htf_enabled = self._env_bool("MOMENTUM_HTF_ENABLED", True)
+        self.htf_timeframe = os.environ.get("MOMENTUM_HTF_TIMEFRAME", "1h") or "1h"
+        try:
+            self.htf_trend_agreement_weight = float(
+                os.environ.get("MOMENTUM_HTF_TREND_WEIGHT", "0.30") or "0.30"
+            )
+        except (TypeError, ValueError):
+            self.htf_trend_agreement_weight = 0.30
+        self.htf_trend_agreement_weight = max(0.0, min(self.htf_trend_agreement_weight, 1.0))
+        self._htf_cache: dict[str, Any] = {}  # cached HTF context
+        self._htf_cache_ts: float = 0.0
+        try:
+            self._htf_cache_ttl_sec = float(os.environ.get("MOMENTUM_HTF_CACHE_TTL_SEC", "300") or "300")
+        except (TypeError, ValueError):
+            self._htf_cache_ttl_sec = 300.0
+
+        # --- Volume confirmation gate ---
+        self.volume_gate_enabled = self._env_bool("MOMENTUM_VOLUME_GATE_ENABLED", True)
+        try:
+            self.volume_gate_min_ratio = float(
+                os.environ.get("MOMENTUM_VOLUME_GATE_MIN_RATIO", "0.50") or "0.50"
+            )
+        except (TypeError, ValueError):
+            self.volume_gate_min_ratio = 0.50
+        self.volume_gate_min_ratio = max(0.0, self.volume_gate_min_ratio)
+
+        # --- Native exchange stop loss ---
+        self.native_stop_enabled = self._env_bool("MOMENTUM_NATIVE_STOP_ENABLED", True)
+        try:
+            self.native_stop_loss_pct = float(
+                os.environ.get("MOMENTUM_NATIVE_STOP_LOSS_PCT", "0.02") or "0.02"
+            )
+        except (TypeError, ValueError):
+            self.native_stop_loss_pct = 0.02
+        self.native_stop_loss_pct = max(0.001, min(self.native_stop_loss_pct, 0.20))
+        self._active_stop_orders: dict[str, str] = {}  # symbol -> stop_order_id
+
+        logger.info(
+            "Extended gates | partial_fills=%s watchdog=%s(%.0fs) htf=%s(%s) volume_gate=%s(%.2f) native_stop=%s(%.2f%%)",
+            self.reconcile_partial_fills,
+            self.watchdog_enabled, self.watchdog_max_stale_sec,
+            self.htf_enabled, self.htf_timeframe,
+            self.volume_gate_enabled, self.volume_gate_min_ratio,
+            self.native_stop_enabled, self.native_stop_loss_pct * 100,
+        )
+
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
         try:
@@ -821,6 +887,9 @@ class MomentumWorker:
         if countertrend_blocked:
             direction_gate = False
 
+        # Volume confirmation gate
+        volume_gate_ok, volume_ratio = self._volume_gate_check(context)
+
         allowed = (
             confidence_gate
             and conviction_gate
@@ -829,7 +898,11 @@ class MomentumWorker:
             and pattern_gate
             and agreement_gate
             and direction_gate
+            and volume_gate_ok
         )
+
+        # Candlestick patterns detected
+        candle_patterns_list = context.get("candle_patterns", [])
 
         snapshot: dict[str, Any] = {
             "side": side,
@@ -841,6 +914,9 @@ class MomentumWorker:
             "momentum_score_directional": float(momentum_score_directional),
             "vol_score": float(vol_score),
             "pattern_score": float(pattern_score),
+            "candle_patterns": candle_patterns_list,
+            "volume_ratio": float(volume_ratio),
+            "volume_gate": bool(volume_gate_ok),
             "trend_regime": _trend_regime,
             "aligned_trend_regime": trend_regime,
             "aligned_trend_score": float(aligned_trend_score),
@@ -877,6 +953,8 @@ class MomentumWorker:
             return False, "entry_gate_failed:trend", snapshot
         if not vol_gate:
             return False, "entry_gate_failed:volatility", snapshot
+        if not volume_gate_ok:
+            return False, "entry_gate_failed:volume_too_low", snapshot
         if not pattern_gate:
             return False, "entry_gate_failed:pattern", snapshot
         if not agreement_gate:
@@ -886,6 +964,323 @@ class MomentumWorker:
         if not direction_gate:
             return False, "entry_gate_failed:direction", snapshot
         return False, "entry_gate_failed:unknown", snapshot
+
+    # ------------------------------------------------------------------
+    # (1) Partial fill reconciliation
+    # ------------------------------------------------------------------
+
+    def _track_pending_order(self, order_id: str, symbol: str, side: str, expected_qty: float) -> None:
+        """Register a submitted order for partial fill tracking."""
+        if not self.reconcile_partial_fills or not order_id:
+            return
+        self._pending_fill_orders[order_id] = {
+            "symbol": symbol,
+            "side": side,
+            "expected_qty": float(expected_qty),
+            "filled_qty": 0.0,
+            "placed_at": datetime.now(timezone.utc).timestamp(),
+        }
+
+    async def _reconcile_partial_fills(self) -> None:
+        """Poll exchange for partially filled maker orders and reconcile position qty."""
+        if not self.reconcile_partial_fills or not self._pending_fill_orders:
+            return
+        exchange = getattr(self.execution_engine, "exchange", None)
+        if exchange is None or getattr(self.execution_engine, "paper_mode", True):
+            return
+
+        completed: list[str] = []
+        for order_id, info in list(self._pending_fill_orders.items()):
+            try:
+                symbol = str(info.get("symbol", self.symbol))
+                exchange_symbol = self.execution_engine._resolve_exchange_symbol(symbol)
+                fetched = exchange.fetch_order(order_id, exchange_symbol)
+                if not fetched:
+                    continue
+
+                filled = float(fetched.get("filled") or 0.0)
+                status = str(fetched.get("status") or "").lower()
+                prev_filled = float(info.get("filled_qty", 0.0))
+
+                if filled > prev_filled:
+                    delta = filled - prev_filled
+                    info["filled_qty"] = filled
+                    logger.info(
+                        "Partial fill reconciled | order=%s filled=%.6f/%.6f delta=%.6f status=%s",
+                        order_id, filled, info["expected_qty"], delta, status,
+                    )
+                    # Update position quantity if already tracked
+                    local_symbol = self._find_local_position_symbol(symbol) or symbol
+                    pos = self.risk_manager.positions.get(local_symbol)
+                    if pos and prev_filled > 0:
+                        pos["quantity"] = float(filled)
+
+                if status in ("closed", "filled", "canceled", "cancelled", "expired", "rejected"):
+                    completed.append(order_id)
+                    final_filled = float(info.get("filled_qty", 0.0))
+                    expected = float(info["expected_qty"])
+                    if final_filled < expected and final_filled > 0:
+                        logger.warning(
+                            "Order partially filled | order=%s filled=%.6f expected=%.6f status=%s",
+                            order_id, final_filled, expected, status,
+                        )
+                        local_symbol = self._find_local_position_symbol(symbol) or symbol
+                        pos = self.risk_manager.positions.get(local_symbol)
+                        if pos:
+                            pos["quantity"] = float(final_filled)
+                    elif final_filled <= 0 and status in ("canceled", "cancelled", "expired"):
+                        # Never filled — remove position if we opened one
+                        local_symbol = self._find_local_position_symbol(symbol) or symbol
+                        if local_symbol in self.risk_manager.positions:
+                            side = str(info.get("side", "")).lower()
+                            pos_side = str(self.risk_manager.positions[local_symbol].get("side", "")).lower()
+                            if side == pos_side:
+                                del self.risk_manager.positions[local_symbol]
+                                self.position_guards.pop(local_symbol, None)
+                                logger.info("Removed unfilled position | symbol=%s order=%s", local_symbol, order_id)
+
+            except Exception as exc:
+                logger.debug("Failed polling order %s: %s", order_id, exc)
+
+        for oid in completed:
+            self._pending_fill_orders.pop(oid, None)
+
+    # ------------------------------------------------------------------
+    # (2) Real candlestick pattern detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_candlestick_patterns(candles: pd.DataFrame) -> dict[str, float]:
+        """Detect real candlestick patterns and return bullish/bearish scores [0..1]."""
+        result = {"bullish": 0.0, "bearish": 0.0, "patterns": []}
+        if candles is None or len(candles) < 3:
+            return result
+
+        o = pd.to_numeric(candles["open"], errors="coerce")
+        h = pd.to_numeric(candles["high"], errors="coerce")
+        low = pd.to_numeric(candles["low"], errors="coerce")
+        c = pd.to_numeric(candles["close"], errors="coerce")
+
+        # Last 3 candles
+        o1, o2, o3 = float(o.iloc[-1]), float(o.iloc[-2]), float(o.iloc[-3])
+        h1, h2, h3 = float(h.iloc[-1]), float(h.iloc[-2]), float(h.iloc[-3])
+        l1, l2, l3 = float(low.iloc[-1]), float(low.iloc[-2]), float(low.iloc[-3])
+        c1, c2, c3 = float(c.iloc[-1]), float(c.iloc[-2]), float(c.iloc[-3])
+
+        body1 = abs(c1 - o1)
+        body2 = abs(c2 - o2)
+        range1 = max(h1 - l1, 1e-9)
+        range2 = max(h2 - l2, 1e-9)
+
+        upper_wick1 = h1 - max(o1, c1)
+        lower_wick1 = min(o1, c1) - l1
+
+        bullish_score = 0.0
+        bearish_score = 0.0
+        patterns = []
+
+        # Bullish engulfing
+        if c2 < o2 and c1 > o1 and o1 <= c2 and c1 >= o2:
+            bullish_score += 0.4
+            patterns.append("bullish_engulfing")
+
+        # Bearish engulfing
+        if c2 > o2 and c1 < o1 and o1 >= c2 and c1 <= o2:
+            bearish_score += 0.4
+            patterns.append("bearish_engulfing")
+
+        # Hammer (bullish): small body at top, long lower wick
+        if lower_wick1 >= body1 * 2.0 and upper_wick1 < body1 * 0.5 and body1 / range1 < 0.35:
+            bullish_score += 0.3
+            patterns.append("hammer")
+
+        # Shooting star (bearish): small body at bottom, long upper wick
+        if upper_wick1 >= body1 * 2.0 and lower_wick1 < body1 * 0.5 and body1 / range1 < 0.35:
+            bearish_score += 0.3
+            patterns.append("shooting_star")
+
+        # Doji (indecision)
+        if body1 / range1 < 0.10:
+            patterns.append("doji")
+
+        # Morning star (bullish 3-bar)
+        if (c3 < o3 and body2 / range2 < 0.20 and c1 > o1
+                and c1 > (o3 + c3) / 2):
+            bullish_score += 0.3
+            patterns.append("morning_star")
+
+        # Evening star (bearish 3-bar)
+        if (c3 > o3 and body2 / range2 < 0.20 and c1 < o1
+                and c1 < (o3 + c3) / 2):
+            bearish_score += 0.3
+            patterns.append("evening_star")
+
+        # Three white soldiers (bullish)
+        if c1 > o1 and c2 > o2 and c3 > o3 and c1 > c2 > c3:
+            bullish_score += 0.25
+            patterns.append("three_white_soldiers")
+
+        # Three black crows (bearish)
+        if c1 < o1 and c2 < o2 and c3 < o3 and c1 < c2 < c3:
+            bearish_score += 0.25
+            patterns.append("three_black_crows")
+
+        result["bullish"] = min(1.0, bullish_score)
+        result["bearish"] = min(1.0, bearish_score)
+        result["patterns"] = patterns
+        return result
+
+    # ------------------------------------------------------------------
+    # (3) Volume confirmation gate
+    # ------------------------------------------------------------------
+
+    def _volume_gate_check(self, context: dict[str, Any]) -> tuple[bool, float]:
+        """Return (passes, volume_ratio) - blocks entry if volume too low."""
+        if not self.volume_gate_enabled:
+            return True, 1.0
+        vol_ma20 = float(context.get("vol_ma20", 0.0))
+        vol_last = float(context.get("vol_last", 0.0))
+        if vol_ma20 <= 0:
+            return True, 1.0  # Can't evaluate, pass
+        ratio = vol_last / vol_ma20
+        return ratio >= self.volume_gate_min_ratio, round(ratio, 4)
+
+    # ------------------------------------------------------------------
+    # (4) Multi-timeframe HTF confirmation
+    # ------------------------------------------------------------------
+
+    async def _fetch_htf_context(self) -> dict[str, Any]:
+        """Fetch and cache higher-timeframe context metrics."""
+        import time as _time
+        now = _time.time()
+        if self._htf_cache and (now - self._htf_cache_ts) < self._htf_cache_ttl_sec:
+            return self._htf_cache
+
+        try:
+            htf_candles = await self._load_ohlcv(
+                symbol=self.symbol,
+                timeframe=self.htf_timeframe,
+                limit=50,
+            )
+            if htf_candles is not None and not htf_candles.empty:
+                ctx = self._compute_context_metrics(htf_candles)
+                if ctx:
+                    self._htf_cache = ctx
+                    self._htf_cache_ts = now
+                    return ctx
+        except Exception as exc:
+            logger.debug("HTF fetch failed (%s): %s", self.htf_timeframe, exc)
+
+        return self._htf_cache or {}
+
+    def _htf_trend_agrees(self, side: str, htf_context: dict[str, Any]) -> tuple[bool, float]:
+        """Check if higher-timeframe trend agrees with proposed entry side."""
+        if not self.htf_enabled or not htf_context:
+            return True, 0.0
+        htf_trend = float(htf_context.get("trend_pct", 0.0))
+        if side == "buy":
+            agrees = htf_trend >= 0
+        else:
+            agrees = htf_trend <= 0
+        return agrees, round(htf_trend, 4)
+
+    # ------------------------------------------------------------------
+    # (5) Native exchange stop loss
+    # ------------------------------------------------------------------
+
+    async def _place_native_stop(self, symbol: str, side: str, entry_price: float, qty: float) -> str | None:
+        """Place a native stop-market order on the exchange after entry."""
+        if not self.native_stop_enabled:
+            return None
+        exchange = getattr(self.execution_engine, "exchange", None)
+        if exchange is None or getattr(self.execution_engine, "paper_mode", True):
+            return None
+
+        try:
+            exchange_symbol = self.execution_engine._resolve_exchange_symbol(symbol)
+            stop_side = "sell" if side == "buy" else "buy"
+            if side == "buy":
+                stop_price = entry_price * (1.0 - self.native_stop_loss_pct)
+            else:
+                stop_price = entry_price * (1.0 + self.native_stop_loss_pct)
+
+            # Normalize precision
+            try:
+                stop_price = float(exchange.price_to_precision(exchange_symbol, stop_price))
+            except Exception:
+                pass
+
+            # Use exchange amount for contracts
+            market = exchange.market(exchange_symbol)
+            amount = qty
+            if market.get("contract"):
+                contract_size = float(market.get("contractSize") or 1.0) or 1.0
+                inverse = bool(market.get("inverse"))
+                if inverse:
+                    amount = max(1, round(qty * entry_price / contract_size))
+                else:
+                    amount = max(1, round(qty / contract_size))
+            try:
+                amount = float(exchange.amount_to_precision(exchange_symbol, amount))
+            except Exception:
+                pass
+
+            params: dict[str, Any] = {"reduceOnly": True}
+            # Kraken futures uses stopPrice in params
+            params["stopPrice"] = stop_price
+            params["triggerPrice"] = stop_price
+
+            order = exchange.create_order(
+                symbol=exchange_symbol,
+                type="stop",
+                side=stop_side,
+                amount=amount,
+                price=None,
+                params=params,
+            )
+            order_id = str(order.get("id") or "")
+            self._active_stop_orders[symbol] = order_id
+            logger.info(
+                "Native stop placed | symbol=%s side=%s stop_price=%.2f qty=%.6f order_id=%s",
+                exchange_symbol, stop_side, stop_price, amount, order_id,
+            )
+            return order_id
+
+        except Exception as exc:
+            logger.warning("Failed to place native stop for %s: %s", symbol, exc)
+            return None
+
+    async def _cancel_native_stop(self, symbol: str) -> None:
+        """Cancel the native stop order when position is closed."""
+        order_id = self._active_stop_orders.pop(symbol, None)
+        if not order_id:
+            return
+        exchange = getattr(self.execution_engine, "exchange", None)
+        if exchange is None:
+            return
+        try:
+            exchange_symbol = self.execution_engine._resolve_exchange_symbol(symbol)
+            exchange.cancel_order(order_id, exchange_symbol)
+            logger.info("Native stop canceled | symbol=%s order_id=%s", symbol, order_id)
+        except Exception as exc:
+            logger.debug("Failed to cancel native stop %s: %s", order_id, exc)
+
+    # ------------------------------------------------------------------
+    # (6) Watchdog heartbeat
+    # ------------------------------------------------------------------
+
+    def _record_heartbeat(self) -> None:
+        """Record that an iteration completed successfully."""
+        import time as _time
+        self._last_iteration_ts = _time.time()
+
+    def _is_stale(self) -> bool:
+        """Check if worker hasn't completed an iteration within threshold."""
+        if not self.watchdog_enabled or self._last_iteration_ts <= 0:
+            return False
+        import time as _time
+        elapsed = _time.time() - self._last_iteration_ts
+        return elapsed > self.watchdog_max_stale_sec
 
     def _compute_context_metrics(self, candles: pd.DataFrame) -> dict[str, Any]:
         if candles is None or candles.empty or "close" not in candles.columns:
@@ -952,7 +1347,14 @@ class MomentumWorker:
         atr = self._atr(candles, period=14)
         vol_ma20 = float(volume.tail(20).mean()) if not volume.dropna().empty else 0.0
         vol_last = float(volume.iloc[-1]) if len(volume) else 0.0
+        vol_ratio = (vol_last / vol_ma20) if vol_ma20 > 0 else 1.0
         correlation = self._correlation_spike(candles)
+
+        # Real candlestick pattern detection
+        candle_patterns = self._detect_candlestick_patterns(candles)
+        # Blend body-ratio pattern score with real pattern detection (50/50)
+        pattern_long_blended = 0.5 * bullish_body + 0.5 * float(candle_patterns.get("bullish", 0.0))
+        pattern_short_blended = 0.5 * bearish_body + 0.5 * float(candle_patterns.get("bearish", 0.0))
 
         return {
             "price": current_price,
@@ -962,8 +1364,13 @@ class MomentumWorker:
             "trend_pct": float(trend_pct),
             "momentum": float(momentum),
             "confidence": float(confidence_score),
-            "pattern_long": float(bullish_body),
-            "pattern_short": float(bearish_body),
+            "pattern_long": float(pattern_long_blended),
+            "pattern_short": float(pattern_short_blended),
+            "pattern_long_body": float(bullish_body),
+            "pattern_short_body": float(bearish_body),
+            "pattern_long_candle": float(candle_patterns.get("bullish", 0.0)),
+            "pattern_short_candle": float(candle_patterns.get("bearish", 0.0)),
+            "candle_patterns": candle_patterns.get("patterns", []),
             "imbalance_long": float(up_ratio),
             "imbalance_short": float(down_ratio),
             "composite_long": float(composite_long),
@@ -971,6 +1378,7 @@ class MomentumWorker:
             "atr": float(atr),
             "vol_ma20": float(vol_ma20),
             "vol_last": float(vol_last),
+            "vol_ratio": float(vol_ratio),
             "correlation": float(correlation),
             "reversal_long": self._strong_reversal_against_trend(candles, "buy", sma20),
             "reversal_short": self._strong_reversal_against_trend(candles, "sell", sma20),
@@ -2215,13 +2623,15 @@ class MomentumWorker:
             logger.exception("Failed to persist trade")
 
     async def start(self) -> None:
-        """Start the momentum worker loop."""
+        """Start the momentum worker loop with watchdog."""
         self.is_running = True
+        self._record_heartbeat()
         logger.info("Starting MomentumWorker for %s", self.symbol)
 
         while self.is_running:
             try:
                 await self._run_iteration()
+                self._record_heartbeat()
                 await asyncio.sleep(self._interval_seconds())
             except asyncio.CancelledError:
                 self.is_running = False
@@ -2229,6 +2639,7 @@ class MomentumWorker:
                 raise
             except Exception as e:
                 logger.error("Worker iteration failed: %s", e)
+                self._record_heartbeat()  # still alive, just errored
                 await asyncio.sleep(self._interval_seconds())
 
     async def stop(self) -> None:
@@ -2242,6 +2653,7 @@ class MomentumWorker:
             logger.info("🔄 Iteration started for %s", self.symbol)
             self.last_decision_reason = "iteration_started"
             await self._sync_live_exchange_state()
+            await self._reconcile_partial_fills()
 
             status = self.risk_manager.get_status()
             drawdown = status.get("drawdown_pct", 0)
@@ -2253,7 +2665,7 @@ class MomentumWorker:
 
             ohlcv = await self._load_ohlcv(
                 symbol=self.symbol,
-                timeframe="1h",
+                timeframe=self.interval,
                 limit=50,
             )
             if ohlcv is None:
@@ -2302,6 +2714,9 @@ class MomentumWorker:
                 if trade_record:
                     self.trade_history.append(trade_record)
                     self._persist_trade(trade_record)
+                    # Cancel native stop on exit
+                    exit_sym = str(exit_signal.get("symbol", self.symbol))
+                    await self._cancel_native_stop(exit_sym)
                 if exit_result and exit_status not in {"rejected", "cancelled", "canceled", "blocked"}:
                     self.last_decision_reason = "exit_submitted"
                 elif not exit_result:
@@ -2357,6 +2772,36 @@ class MomentumWorker:
 
             signal = self._apply_live_order_preferences(signal)
             signal = self._apply_auto_entry_sizing(signal)
+
+            # HTF multi-timeframe confirmation (async)
+            if self.htf_enabled and side in {"buy", "sell"}:
+                htf_ctx = await self._fetch_htf_context()
+                htf_agrees, htf_trend = self._htf_trend_agrees(side, htf_ctx)
+                signal.setdefault("gate_snapshot", {})
+                if isinstance(signal.get("gate_snapshot"), dict):
+                    signal["gate_snapshot"]["htf_trend"] = htf_trend
+                    signal["gate_snapshot"]["htf_agrees"] = htf_agrees
+                    signal["gate_snapshot"]["htf_timeframe"] = self.htf_timeframe
+                if not htf_agrees:
+                    logger.info(
+                        "Skipping signal: HTF (%s) trend disagrees | side=%s htf_trend=%.4f",
+                        self.htf_timeframe, side, htf_trend,
+                    )
+                    self.last_decision_reason = f"entry_gate_failed:htf_trend_{self.htf_timeframe}"
+                    self.signal_history.append(
+                        {
+                            "symbol": str(signal.get("symbol", self.symbol)),
+                            "side": side,
+                            "quantity": float(signal.get("quantity", 0.0) or 0.0),
+                            "status": "blocked",
+                            "reason": self.last_decision_reason,
+                            "block_reason": self.last_decision_reason,
+                            "gate_snapshot": signal.get("gate_snapshot") if isinstance(signal.get("gate_snapshot"), dict) else {},
+                            "confidence_pct": float(((signal.get("gate_snapshot") or {}).get("confidence_pct", 0.0)) if isinstance(signal.get("gate_snapshot"), dict) else 0.0),
+                            "timestamp": signal.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    return
 
             if bool(signal.get("auto_size_blocked")):
                 auto_size_reason = str(signal.get("auto_size_reason") or "auto_size_blocked")
@@ -2434,6 +2879,26 @@ class MomentumWorker:
                     if trade_record:
                         self.trade_history.append(trade_record)
                         self._persist_trade(trade_record)
+
+                    # Track for partial fill reconciliation
+                    order_id = str((result or {}).get("id") or "")
+                    if order_id:
+                        self._track_pending_order(
+                            order_id=order_id,
+                            symbol=str(signal.get("symbol", self.symbol)),
+                            side=side,
+                            expected_qty=float(signal.get("quantity", 0)),
+                        )
+
+                    # Place native exchange stop loss
+                    avg_fill = float((result or {}).get("avg_fill_price") or 0.0)
+                    if avg_fill > 0 and not local_position_symbol:
+                        await self._place_native_stop(
+                            symbol=str(signal.get("symbol", self.symbol)),
+                            side=side,
+                            entry_price=avg_fill,
+                            qty=float(signal.get("quantity", 0)),
+                        )
 
                     if self.max_trades and self.trade_count >= self.max_trades:
                         logger.info("Reached max trades (%s). Stopping worker.", self.max_trades)

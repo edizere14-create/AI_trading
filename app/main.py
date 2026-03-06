@@ -39,6 +39,7 @@ manager: ConnectionManager = ConnectionManager()
 strategy_manager: StrategyManager = StrategyManager()
 momentum_worker: Any | None = None
 momentum_task: asyncio.Task[Any] | None = None
+_watchdog_task: asyncio.Task[Any] | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -223,6 +224,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             momentum_task = asyncio.create_task(momentum_worker.start())
             routes_momentum.momentum_task = momentum_task
             logger.info("Momentum worker auto-started")
+
+            # Start watchdog task
+            async def _watchdog_loop() -> None:
+                global momentum_worker, momentum_task, _watchdog_task
+                while True:
+                    await asyncio.sleep(30)
+                    try:
+                        if momentum_worker and hasattr(momentum_worker, "_is_stale") and momentum_worker._is_stale():
+                            logger.critical(
+                                "WATCHDOG: Worker stale (last heartbeat %.0fs ago). Restarting...",
+                                __import__("time").time() - momentum_worker._last_iteration_ts,
+                            )
+                            momentum_worker._watchdog_restart_count += 1
+                            # Cancel old task
+                            if momentum_task and not momentum_task.done():
+                                momentum_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await momentum_task
+                            # Restart
+                            momentum_worker.is_running = False
+                            await asyncio.sleep(2)
+                            momentum_task = asyncio.create_task(momentum_worker.start())
+                            routes_momentum.momentum_task = momentum_task
+                            logger.info("WATCHDOG: Worker restarted (count=%d)", momentum_worker._watchdog_restart_count)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as exc:
+                        logger.warning("WATCHDOG error: %s", exc)
+
+            _watchdog_task = asyncio.create_task(_watchdog_loop())
     except Exception as exc:
         momentum_worker = None
         routes_momentum.momentum_worker = None
@@ -234,6 +265,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # Shutdown
     logger.info("Shutting down AI Trading application...")
+    if _watchdog_task and not _watchdog_task.done():
+        _watchdog_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _watchdog_task
     if momentum_worker and momentum_worker.is_running:
         await momentum_worker.stop()
     if momentum_task and not momentum_task.done():
