@@ -1645,9 +1645,29 @@ class MomentumWorker:
         desired_notional = min(leverage_notional_target, risk_notional_cap)
 
         symbol = str(signal.get("symbol", self.symbol))
-        contract_size = float(self.execution_engine.get_contract_size(symbol) or 1.0)
-        inverse = bool(self.execution_engine._is_inverse_market(symbol))
-        min_contract_notional = contract_size if inverse else (contract_size * float(reference_price))
+
+        def _min_contract_notional(sym: str) -> float:
+            contract_size = float(self.execution_engine.get_contract_size(sym) or 1.0)
+            inverse = bool(self.execution_engine._is_inverse_market(sym))
+            return contract_size if inverse else (contract_size * float(reference_price))
+
+        min_contract_notional = _min_contract_notional(symbol)
+        chosen_symbol = symbol
+
+        if desired_notional < min_contract_notional:
+            candidates = [symbol]
+            upper = symbol.upper()
+            if upper.startswith("PF_"):
+                candidates.append(symbol.replace("PF_", "PI_", 1))
+            elif upper.startswith("PI_"):
+                candidates.append(symbol.replace("PI_", "PF_", 1))
+
+            for candidate in candidates[1:]:
+                candidate_min_notional = _min_contract_notional(candidate)
+                if desired_notional >= candidate_min_notional:
+                    chosen_symbol = candidate
+                    min_contract_notional = candidate_min_notional
+                    break
 
         if desired_notional < min_contract_notional:
             signal["auto_size_blocked"] = True
@@ -1657,6 +1677,12 @@ class MomentumWorker:
             signal["quantity"] = 0.0
             signal["equity"] = float(equity)
             return signal
+
+        if chosen_symbol != symbol:
+            signal["symbol"] = chosen_symbol
+            signal["auto_size_symbol_switched"] = True
+            signal["auto_size_symbol_from"] = symbol
+            signal["auto_size_symbol_to"] = chosen_symbol
 
         sized_qty = desired_notional / float(reference_price)
         sized_qty = max(self.entry_auto_size_min_qty, min(sized_qty, self.entry_auto_size_max_qty))
@@ -1670,7 +1696,7 @@ class MomentumWorker:
 
         logger.info(
             "Auto-sized entry | symbol=%s side=%s equity=%.2f price=%.2f qty=%.6f notional=%.2f target_lev=%.2f",
-            symbol,
+            str(signal.get("symbol", symbol)),
             side,
             equity,
             reference_price,
