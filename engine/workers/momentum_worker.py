@@ -214,6 +214,32 @@ class MomentumWorker:
             self.entry_trend_strict_multiplier = 1.25
         self.entry_trend_strict_multiplier = max(1.0, min(self.entry_trend_strict_multiplier, 2.0))
         self.entry_block_countertrend = self._env_bool("MOMENTUM_ENTRY_BLOCK_COUNTERTREND", True)
+        self.entry_auto_size_enabled = self._env_bool("MOMENTUM_ENTRY_AUTO_SIZE_ENABLED", True)
+        self.entry_auto_size_override_signal_qty = self._env_bool("MOMENTUM_ENTRY_AUTO_SIZE_OVERRIDE_SIGNAL_QTY", True)
+        try:
+            self.entry_auto_size_target_leverage = float(
+                os.environ.get("MOMENTUM_ENTRY_AUTO_SIZE_TARGET_LEVERAGE", "0.50") or "0.50"
+            )
+        except (TypeError, ValueError):
+            self.entry_auto_size_target_leverage = 0.50
+        self.entry_auto_size_target_leverage = max(0.01, min(self.entry_auto_size_target_leverage, 10.0))
+        try:
+            self.entry_auto_size_leverage_cap_fraction = float(
+                os.environ.get("MOMENTUM_ENTRY_AUTO_SIZE_LEVERAGE_CAP_FRACTION", "0.90") or "0.90"
+            )
+        except (TypeError, ValueError):
+            self.entry_auto_size_leverage_cap_fraction = 0.90
+        self.entry_auto_size_leverage_cap_fraction = max(0.10, min(self.entry_auto_size_leverage_cap_fraction, 1.0))
+        try:
+            self.entry_auto_size_min_qty = float(os.environ.get("MOMENTUM_ENTRY_AUTO_SIZE_MIN_QTY", "0.0001") or "0.0001")
+        except (TypeError, ValueError):
+            self.entry_auto_size_min_qty = 0.0001
+        self.entry_auto_size_min_qty = max(0.0, self.entry_auto_size_min_qty)
+        try:
+            self.entry_auto_size_max_qty = float(os.environ.get("MOMENTUM_ENTRY_AUTO_SIZE_MAX_QTY", "0.05") or "0.05")
+        except (TypeError, ValueError):
+            self.entry_auto_size_max_qty = 0.05
+        self.entry_auto_size_max_qty = max(self.entry_auto_size_min_qty, self.entry_auto_size_max_qty)
         logger.info(
             "Entry gates configured | conf>=%.2f conviction>=%.2f trend>=%.2f pattern>=%.2f agreement>=%.2f demo_relaxed=%s",
             self.entry_confidence_gate_pct,
@@ -231,6 +257,15 @@ class MomentumWorker:
             self.entry_trend_relax_multiplier,
             self.entry_trend_strict_multiplier,
             self.entry_block_countertrend,
+        )
+        logger.info(
+            "Entry auto-size | enabled=%s override_qty=%s target_lev=%.2f cap_frac=%.2f min_qty=%s max_qty=%s",
+            self.entry_auto_size_enabled,
+            self.entry_auto_size_override_signal_qty,
+            self.entry_auto_size_target_leverage,
+            self.entry_auto_size_leverage_cap_fraction,
+            self.entry_auto_size_min_qty,
+            self.entry_auto_size_max_qty,
         )
         self.sync_exchange_state = self._env_bool("MOMENTUM_SYNC_EXCHANGE_STATE", True)
         self.cancel_stale_orders = self._env_bool("MOMENTUM_CANCEL_STALE_ORDERS", True)
@@ -1547,6 +1582,104 @@ class MomentumWorker:
         )
         return signal
 
+    def _apply_auto_entry_sizing(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.entry_auto_size_enabled:
+            return signal
+        if getattr(self.execution_engine, "paper_mode", True):
+            return signal
+
+        side = str(signal.get("side", "")).lower()
+        if side not in {"buy", "sell"}:
+            return signal
+
+        try:
+            incoming_qty = float(signal.get("quantity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            incoming_qty = 0.0
+        if incoming_qty > 0 and not self.entry_auto_size_override_signal_qty:
+            return signal
+
+        reference_price = self._reference_price(signal)
+        if reference_price is None or reference_price <= 0:
+            signal["auto_size_blocked"] = True
+            signal["auto_size_reason"] = "missing_reference_price"
+            signal["quantity"] = 0.0
+            return signal
+
+        equity_candidates = [
+            signal.get("equity"),
+            signal.get("account_equity"),
+            signal.get("account_balance"),
+            getattr(self.risk_manager, "current_balance", None),
+            getattr(self.risk_manager, "account_balance", None),
+            self.account_balance,
+        ]
+        equity = 0.0
+        for candidate in equity_candidates:
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                equity = value
+                break
+
+        if equity <= 0:
+            signal["auto_size_blocked"] = True
+            signal["auto_size_reason"] = "missing_positive_equity"
+            signal["quantity"] = 0.0
+            return signal
+
+        max_leverage = float(
+            max(
+                0.1,
+                getattr(self.execution_engine, "max_leverage_ratio", getattr(self.risk_manager, "max_leverage_ratio", 5.0)),
+            )
+        )
+        leverage_cap = max_leverage * self.entry_auto_size_leverage_cap_fraction
+        target_leverage = min(self.entry_auto_size_target_leverage, leverage_cap)
+
+        max_position_pct = float(max(0.0, getattr(self.risk_manager, "max_position_pct", 1.0)))
+        risk_notional_cap = equity * max_position_pct
+        leverage_notional_target = equity * target_leverage
+        desired_notional = min(leverage_notional_target, risk_notional_cap)
+
+        symbol = str(signal.get("symbol", self.symbol))
+        contract_size = float(self.execution_engine.get_contract_size(symbol) or 1.0)
+        inverse = bool(self.execution_engine._is_inverse_market(symbol))
+        min_contract_notional = contract_size if inverse else (contract_size * float(reference_price))
+
+        if desired_notional < min_contract_notional:
+            signal["auto_size_blocked"] = True
+            signal["auto_size_reason"] = (
+                f"min_contract_notional_exceeds_budget:{desired_notional:.2f}<{min_contract_notional:.2f}"
+            )
+            signal["quantity"] = 0.0
+            signal["equity"] = float(equity)
+            return signal
+
+        sized_qty = desired_notional / float(reference_price)
+        sized_qty = max(self.entry_auto_size_min_qty, min(sized_qty, self.entry_auto_size_max_qty))
+
+        signal["quantity"] = float(sized_qty)
+        signal["equity"] = float(equity)
+        signal["expected_price"] = signal.get("expected_price") or float(reference_price)
+        signal["auto_sized"] = True
+        signal["auto_size_notional"] = float(desired_notional)
+        signal["auto_size_target_leverage"] = float(target_leverage)
+
+        logger.info(
+            "Auto-sized entry | symbol=%s side=%s equity=%.2f price=%.2f qty=%.6f notional=%.2f target_lev=%.2f",
+            symbol,
+            side,
+            equity,
+            reference_price,
+            signal["quantity"],
+            desired_notional,
+            target_leverage,
+        )
+        return signal
+
     def _bot_order_ids(self) -> set[str]:
         ids: set[str] = set()
         for row in self.signal_history:
@@ -2100,6 +2233,26 @@ class MomentumWorker:
                     return
 
             signal = self._apply_live_order_preferences(signal)
+            signal = self._apply_auto_entry_sizing(signal)
+
+            if bool(signal.get("auto_size_blocked")):
+                auto_size_reason = str(signal.get("auto_size_reason") or "auto_size_blocked")
+                logger.info("Skipping signal: %s | signal=%s", auto_size_reason, signal)
+                self.last_decision_reason = f"entry_size_blocked:{auto_size_reason}"
+                self.signal_history.append(
+                    {
+                        "symbol": str(signal.get("symbol", self.symbol)),
+                        "side": side,
+                        "quantity": float(signal.get("quantity", 0.0) or 0.0),
+                        "status": "blocked",
+                        "reason": self.last_decision_reason,
+                        "block_reason": self.last_decision_reason,
+                        "gate_snapshot": signal.get("gate_snapshot") if isinstance(signal.get("gate_snapshot"), dict) else {},
+                        "confidence_pct": float(((signal.get("gate_snapshot") or {}).get("confidence_pct", 0.0)) if isinstance(signal.get("gate_snapshot"), dict) else 0.0),
+                        "timestamp": signal.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                return
 
             symbol = str(signal.get("symbol", self.symbol))
             local_position_symbol = self._find_local_position_symbol(symbol)
