@@ -122,6 +122,17 @@ def _build_trade_reasoning(
     else:
         stance = "NEUTRAL"
 
+    # Volume gate (mirrors worker logic)
+    volume = candles.get("volume")
+    if volume is not None:
+        vol_series = pd.to_numeric(volume, errors="coerce").dropna()
+        vol_last = float(vol_series.iloc[-1]) if not vol_series.empty else 0.0
+        vol_ma20 = float(vol_series.rolling(20).mean().iloc[-1]) if len(vol_series) >= 20 else 0.0
+    else:
+        vol_last, vol_ma20 = 0.0, 0.0
+    vol_ratio = (vol_last / vol_ma20) if vol_ma20 > 0 else 1.0
+    volume_gate = vol_ratio >= 0.80
+
     confidence_gate = ai_conf >= float(confidence_threshold)
     conviction_gate = abs(composite) >= float(conviction_threshold)
     trend_gate = trend_score >= 0.30
@@ -172,6 +183,13 @@ def _build_trade_reasoning(
             "status": "PASS" if agreement_gate else "FAIL",
             "why": "No confirming signals" if not agreement_gate else "Directional agreement confirmed",
         },
+        {
+            "gate": "Volume ratio >= 0.80",
+            "threshold": 0.80,
+            "actual": round(vol_ratio, 4),
+            "status": "PASS" if volume_gate else "FAIL",
+            "why": "Volume too low for safe entry" if not volume_gate else "Volume sufficient",
+        },
     ]
 
     go_nogo = "GO" if (
@@ -181,6 +199,7 @@ def _build_trade_reasoning(
         and vol_gate
         and pattern_gate
         and agreement_gate
+        and volume_gate
         and stance != "NEUTRAL"
     ) else "NO-GO"
     go_nogo_reason = (
@@ -206,6 +225,8 @@ def _build_trade_reasoning(
         actions.append(
             f"Need directional agreement in recent signals (buy/sell imbalance >= {float(agreement_threshold):.2f})."
         )
+    if not volume_gate:
+        actions.append(f"Wait for volume to pick up (current ratio {vol_ratio:.2f} < 0.80 vs 20-bar MA).")
     if not actions:
         actions.append("All gates passed: eligible for execution with risk controls.")
 
@@ -222,6 +243,7 @@ def _build_trade_reasoning(
         "composite": composite,
         "go_nogo": go_nogo,
         "go_nogo_reason": go_nogo_reason,
+        "volume_ratio": vol_ratio,
     }
 
 
@@ -234,6 +256,7 @@ def render_execution_debug(signal: Mapping[str, float]) -> None:
     vol_value = float(signal.get("vol_score", 0.0) or 0.0)
     pattern_value = float(signal.get("pattern_quality", 0.0) or 0.0)
     agreement_value = float(signal.get("signal_agreement", 0.0) or 0.0)
+    volume_ratio = float(signal.get("volume_ratio", 1.0) or 1.0)
 
     gate_rows: list[dict[str, float | str | bool]] = [
         {"key": "confidence", "value": confidence_value, "pass": confidence_value >= 55, "threshold": 55.0},
@@ -242,6 +265,7 @@ def render_execution_debug(signal: Mapping[str, float]) -> None:
         {"key": "vol_regime", "value": vol_value, "pass": True, "threshold": "Normalized"},
         {"key": "pattern", "value": pattern_value, "pass": pattern_value >= 0.25, "threshold": 0.25},
         {"key": "agreement", "value": agreement_value, "pass": agreement_value >= 0.30, "threshold": 0.30},
+        {"key": "volume", "value": volume_ratio, "pass": volume_ratio >= 0.80, "threshold": 0.80},
     ]
 
     executed = all(bool(row["pass"]) for row in gate_rows)
@@ -262,6 +286,8 @@ def render_execution_debug(signal: Mapping[str, float]) -> None:
             next_steps.append("• Require stronger candle pattern")
         if agreement_value == 0:
             next_steps.append("• Need directional signal agreement ≥0.30")
+        if volume_ratio < 0.80:
+            next_steps.append(f"• Volume ratio too low ({volume_ratio:.2f} < 0.80)")
 
         for step in next_steps:
             st.caption(step)
@@ -512,6 +538,7 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                     if not factors_df.empty and "factor" in factors_df.columns and "raw" in factors_df.columns and (factors_df["factor"] == "Signal Agreement").any()
                     else 0.0
                 ),
+                "volume_ratio": float(reasoning.get("volume_ratio", 1.0) or 1.0),
             }
             render_execution_debug(signal_debug)
 
@@ -597,6 +624,7 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                     "pattern_gate": "pattern",
                     "agreement_gate": "agreement",
                     "direction_gate": "direction",
+                    "volume_gate": "volume",
                 }
                 failed_gates = [
                     gate_labels.get(key, key)
@@ -614,6 +642,19 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
                     st.caption(f"Entry gate snapshot: {' | '.join(details)}")
                 if failed_gates:
                     st.caption(f"Failed gates: {', '.join(failed_gates)}")
+                # Show new gate info from snapshot
+                vol_ratio_snap = pd.to_numeric(entry_gate_snapshot.get("volume_ratio"), errors="coerce")
+                if pd.notna(vol_ratio_snap):
+                    details.append(f"vol_ratio={float(vol_ratio_snap):.2f}")
+                candle_patterns_snap = entry_gate_snapshot.get("candle_patterns", [])
+                if isinstance(candle_patterns_snap, list) and candle_patterns_snap:
+                    st.caption(f"Candle patterns: {', '.join(str(p) for p in candle_patterns_snap)}")
+                htf_agrees_snap = entry_gate_snapshot.get("htf_agrees")
+                if htf_agrees_snap is not None:
+                    htf_tf = entry_gate_snapshot.get("htf_timeframe", "4h")
+                    htf_trend_snap = entry_gate_snapshot.get("htf_trend", 0.0)
+                    htf_label = "agrees" if htf_agrees_snap else "DISAGREES"
+                    st.caption(f"HTF ({htf_tf}): {htf_label} | trend={float(htf_trend_snap):.4f}")
         else:
             st.caption("Worker status unavailable.")
 
@@ -672,15 +713,27 @@ def render_backtesting(api_url: str) -> None:
         st.stop()
 
     stats = bt.get("stats", {})
-    c1, c2, c3, c4, c5 = st.columns(5)
+    analytics = bt.get("analytics", {})
+    profit_factor = float(analytics.get("profit_factor", stats.get("profit_factor", 0)) or 0)
+    total_return_pct = float(analytics.get("total_return_pct", stats.get("total_return_pct", 0)) or 0)
+
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Net PnL", f"${float(stats.get('net_pnl', 0)):,.2f}")
-    c2.metric("Win Rate", f"{float(stats.get('win_rate', 0)):.2f}%")
-    c3.metric("Sharpe", f"{float(stats.get('sharpe', 0)):.2f}")
-    c4.metric("Max Drawdown", f"${float(stats.get('max_drawdown', 0)):,.2f}")
-    c5.metric("Trades", f"{int(stats.get('trades', 0))}")
+    c2.metric("Return %", f"{total_return_pct:.2f}%")
+    c3.metric("Win Rate", f"{float(stats.get('win_rate', 0)):.2f}%")
+    c4.metric("Sharpe", f"{float(stats.get('sharpe', 0)):.2f}")
+    c5.metric("Max Drawdown", f"{float(stats.get('max_drawdown', 0)):.2f}%")
+    c6.metric("Profit Factor", f"{profit_factor:.2f}")
+    c7.metric("Trades", f"{int(stats.get('trades', 0))}")
 
     curve = pd.DataFrame(bt.get("equity_curve", []))
     if not curve.empty:
         fig = go.Figure(go.Scatter(x=curve["t"], y=curve["equity"], mode="lines", name="Equity Curve"))
         fig.update_layout(template="plotly_dark", height=420, margin=dict(l=8, r=8, t=24, b=8))
         st.plotly_chart(fig, use_container_width=True)
+
+    monthly = bt.get("monthly_performance", [])
+    if monthly:
+        mdf = pd.DataFrame(monthly)
+        st.subheader("Monthly Performance")
+        st.dataframe(mdf, use_container_width=True, hide_index=True)

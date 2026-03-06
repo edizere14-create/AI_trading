@@ -994,7 +994,7 @@ class MomentumWorker:
             try:
                 symbol = str(info.get("symbol", self.symbol))
                 exchange_symbol = self.execution_engine._resolve_exchange_symbol(symbol)
-                fetched = exchange.fetch_order(order_id, exchange_symbol)
+                fetched = await asyncio.to_thread(exchange.fetch_order, order_id, exchange_symbol)
                 if not fetched:
                     continue
 
@@ -1230,13 +1230,14 @@ class MomentumWorker:
             params["stopPrice"] = stop_price
             params["triggerPrice"] = stop_price
 
-            order = exchange.create_order(
-                symbol=exchange_symbol,
-                type="stop",
-                side=stop_side,
-                amount=amount,
-                price=None,
-                params=params,
+            order = await asyncio.to_thread(
+                exchange.create_order,
+                exchange_symbol,
+                "stop",
+                stop_side,
+                amount,
+                None,
+                params,
             )
             order_id = str(order.get("id") or "")
             self._active_stop_orders[symbol] = order_id
@@ -1260,7 +1261,7 @@ class MomentumWorker:
             return
         try:
             exchange_symbol = self.execution_engine._resolve_exchange_symbol(symbol)
-            exchange.cancel_order(order_id, exchange_symbol)
+            await asyncio.to_thread(exchange.cancel_order, order_id, exchange_symbol)
             logger.info("Native stop canceled | symbol=%s order_id=%s", symbol, order_id)
         except Exception as exc:
             logger.debug("Failed to cancel native stop %s: %s", order_id, exc)
