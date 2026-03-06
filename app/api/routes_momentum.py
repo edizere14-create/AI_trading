@@ -6,6 +6,7 @@ import os
 import logging
 import traceback
 import math
+from datetime import datetime, timezone
 from contextlib import suppress
 from typing import Any
 
@@ -169,6 +170,122 @@ def _worker_signals(limit: int = 50) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _build_confidence_samples(limit: int = 200) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    global momentum_worker
+    if momentum_worker is None:
+        return [], {
+            "samples": 0,
+            "gate_conf_mean": 0.0,
+            "display_conf_mean": 0.0,
+            "divergence_max": 0.0,
+            "pass_rate_pct": 0.0,
+            "saturated_count": 0,
+            "confidence_floor": 55.0,
+        }
+
+    confidence_floor = _safe_float(getattr(momentum_worker, "entry_confidence_gate_pct", 55.0), 55.0)
+    history = list(getattr(momentum_worker, "signal_history", []))
+    rows = [row for row in history if isinstance(row, dict)][-limit:]
+
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        gate_snapshot = row.get("gate_snapshot") if isinstance(row.get("gate_snapshot"), dict) else {}
+        gate_confidence = _finite_or_none(gate_snapshot.get("confidence_pct"))
+        display_confidence = _finite_or_none(row.get("confidence_pct"))
+        if display_confidence is None:
+            display_confidence = _finite_or_none(row.get("confidence"))
+        if display_confidence is None:
+            display_confidence = gate_confidence
+
+        if gate_confidence is None and display_confidence is None:
+            continue
+
+        gate_conf = float(gate_confidence if gate_confidence is not None else display_confidence or 0.0)
+        display_conf = float(display_confidence if display_confidence is not None else gate_conf)
+        status = str(row.get("status") or "").lower()
+        block_reason = str(row.get("reason") or row.get("block_reason") or "").strip()
+        passed_gate = status not in {"blocked", "rejected"}
+
+        samples.append(
+            {
+                "timestamp": row.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                "gate_confidence": gate_conf,
+                "display_confidence": display_conf,
+                "divergence": abs(display_conf - gate_conf) / 100.0,
+                "passed_gate": passed_gate,
+                "block_reason": block_reason or None,
+                "composite": _finite_or_none(gate_snapshot.get("composite")),
+                "trend_score": _finite_or_none(gate_snapshot.get("trend_score")),
+                "momentum_score": _finite_or_none(gate_snapshot.get("momentum_score_directional")),
+                "pattern_score": _finite_or_none(gate_snapshot.get("pattern_score")),
+                "vol_score": _finite_or_none(gate_snapshot.get("vol_score")),
+                "confidence_floor": confidence_floor,
+                "bias": str(row.get("side") or gate_snapshot.get("side") or "").upper() or None,
+                "volatility": _finite_or_none(gate_snapshot.get("vol_score")),
+            }
+        )
+
+    # Ensure latest gate state is visible even when no order record was written.
+    latest_gate = getattr(momentum_worker, "last_entry_gate_snapshot", None)
+    if isinstance(latest_gate, dict) and latest_gate:
+        latest_reason = str(getattr(momentum_worker, "last_decision_reason", "") or "")
+        gate_conf = _safe_float(latest_gate.get("confidence_pct"), 0.0)
+        if gate_conf > 0:
+            samples.append(
+                {
+                    "timestamp": latest_gate.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    "gate_confidence": gate_conf,
+                    "display_confidence": gate_conf,
+                    "divergence": 0.0,
+                    "passed_gate": not latest_reason.startswith("entry_gate_failed"),
+                    "block_reason": latest_reason if latest_reason.startswith("entry_gate_failed") else None,
+                    "composite": _finite_or_none(latest_gate.get("composite")),
+                    "trend_score": _finite_or_none(latest_gate.get("trend_score")),
+                    "momentum_score": _finite_or_none(latest_gate.get("momentum_score_directional")),
+                    "pattern_score": _finite_or_none(latest_gate.get("pattern_score")),
+                    "vol_score": _finite_or_none(latest_gate.get("vol_score")),
+                    "confidence_floor": confidence_floor,
+                    "bias": str(latest_gate.get("side") or "").upper() or None,
+                    "volatility": _finite_or_none(latest_gate.get("vol_score")),
+                }
+            )
+
+    # Deduplicate same timestamp snapshots while keeping most recent append.
+    dedup: dict[str, dict[str, Any]] = {}
+    for sample in samples[-limit:]:
+        ts = str(sample.get("timestamp") or "")
+        if ts:
+            dedup[ts] = sample
+    samples = list(dedup.values())[-limit:]
+
+    if not samples:
+        stats = {
+            "samples": 0,
+            "gate_conf_mean": 0.0,
+            "display_conf_mean": 0.0,
+            "divergence_max": 0.0,
+            "pass_rate_pct": 0.0,
+            "saturated_count": 0,
+            "confidence_floor": confidence_floor,
+        }
+        return [], stats
+
+    gate_vals = [float(s.get("gate_confidence") or 0.0) for s in samples]
+    display_vals = [float(s.get("display_confidence") or 0.0) for s in samples]
+    divergences = [float(s.get("divergence") or 0.0) for s in samples]
+    pass_count = sum(1 for s in samples if bool(s.get("passed_gate")))
+    stats = {
+        "samples": len(samples),
+        "gate_conf_mean": sum(gate_vals) / len(gate_vals),
+        "display_conf_mean": sum(display_vals) / len(display_vals),
+        "divergence_max": max(divergences) if divergences else 0.0,
+        "pass_rate_pct": (pass_count / len(samples)) * 100.0,
+        "saturated_count": sum(1 for v in gate_vals if v >= 98.0),
+        "confidence_floor": confidence_floor,
+    }
+    return samples, stats
 
 
 def _worker_analytics() -> dict[str, Any]:
@@ -541,6 +658,55 @@ async def get_momentum_history(limit: int = Query(50, ge=1, le=500)) -> dict[str
     signals = list(getattr(momentum_worker, "signal_history", []))[-limit:]
     candles = list(getattr(momentum_worker, "candle_history", []))[-limit:]
     return {"signals": signals, "candles": candles}
+
+
+@router.get("/confidence_history")
+async def get_confidence_history(last_n: int = Query(200, ge=1, le=2000)) -> dict[str, Any]:
+    samples, stats = _build_confidence_samples(limit=last_n)
+    return {
+        "stats": _json_safe(stats),
+        "samples": _json_safe(samples),
+    }
+
+
+@router.get("/confidence_diagnostic")
+async def get_confidence_diagnostic() -> dict[str, Any]:
+    global momentum_worker
+    samples, stats = _build_confidence_samples(limit=200)
+
+    if momentum_worker is None:
+        return {
+            "gate_confidence": 0.0,
+            "display_confidence": 0.0,
+            "confidence_floor": float(stats.get("confidence_floor", 55.0)),
+            "divergence": 0.0,
+            "gate_would_pass": False,
+            "gate_reason": "momentum_worker_not_initialized",
+            "sandbox": _sandbox_mode_from_env(True),
+            "history_stats": _json_safe(stats),
+        }
+
+    latest = samples[-1] if samples else {}
+    gate_confidence = _safe_float(latest.get("gate_confidence"), 0.0)
+    display_confidence = _safe_float(latest.get("display_confidence"), gate_confidence)
+    gate_reason = str(getattr(momentum_worker, "last_decision_reason", "") or "")
+    if not gate_reason:
+        gate_reason = "unknown"
+    gate_would_pass = not gate_reason.startswith("entry_gate_failed")
+
+    execution_engine = getattr(momentum_worker, "execution_engine", None)
+    sandbox = bool(getattr(execution_engine, "sandbox", _sandbox_mode_from_env(True)))
+
+    return {
+        "gate_confidence": gate_confidence,
+        "display_confidence": display_confidence,
+        "confidence_floor": float(stats.get("confidence_floor", 55.0)),
+        "divergence": abs(display_confidence - gate_confidence),
+        "gate_would_pass": gate_would_pass,
+        "gate_reason": gate_reason,
+        "sandbox": sandbox,
+        "history_stats": _json_safe(stats),
+    }
 
 
 @router.get("/orders-sync")

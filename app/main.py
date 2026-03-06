@@ -334,6 +334,24 @@ async def momentum_history_api_alias(
     return payload
 
 
+@app.get("/confidence_history")
+async def confidence_history_alias(
+    last_n: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    payload = await routes_momentum.get_confidence_history(last_n=last_n)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid confidence history payload")
+    return payload
+
+
+@app.get("/confidence_diagnostic")
+async def confidence_diagnostic_alias() -> dict[str, Any]:
+    payload = await routes_momentum.get_confidence_diagnostic()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Invalid confidence diagnostic payload")
+    return payload
+
+
 @app.get("/health")
 async def health_check() -> dict[str, str | int | bool]:
     """Health check endpoint."""

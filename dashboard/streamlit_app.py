@@ -76,8 +76,9 @@ def _compute_auto_position_size(balance: float, entry_price: float, stop_price: 
 def _api_is_healthy(api_url: str) -> bool:
     if str(api_url).strip().lower() in {"all-in-one", "direct"}:
         return True
+    effective_url = _effective_api_url(api_url)
     try:
-        r = requests.get(f"{api_url.rstrip('/')}/health", timeout=HTTP_TIMEOUT_SEC)
+        r = requests.get(f"{effective_url.rstrip('/')}/health", timeout=HTTP_TIMEOUT_SEC)
         if r.status_code != 200:
             return False
         payload = r.json() if r.content else {}
@@ -144,6 +145,7 @@ def _load_futures_symbols(api_url: str, default_symbol: str) -> list[str]:
 
     if str(api_url).strip().lower() in {"all-in-one", "direct"}:
         return list(dict.fromkeys([default_symbol, *fallback]))
+    effective_url = _effective_api_url(api_url)
 
     candidate_paths = [
         "/data/contracts",
@@ -152,7 +154,7 @@ def _load_futures_symbols(api_url: str, default_symbol: str) -> list[str]:
     ]
     for path in candidate_paths:
         try:
-            r = requests.get(f"{api_url.rstrip('/')}{path}", timeout=HTTP_TIMEOUT_SEC)
+            r = requests.get(f"{effective_url.rstrip('/')}{path}", timeout=HTTP_TIMEOUT_SEC)
             if r.status_code != 200:
                 continue
             payload = r.json()
@@ -223,18 +225,22 @@ def _is_ui_only_url(url: str) -> bool:
     return any(host in text for host in UI_ONLY_HOSTS)
 
 
+def _effective_api_url(api_url: str) -> str:
+    if str(api_url).strip().lower() in {"all-in-one", "direct"}:
+        return INTERNAL_API_URL
+    return str(api_url or "").strip()
+
+
 def _render_confidence_chart(api_url: str) -> None:
     """
     Fetches confidence history from FastAPI and renders
     a rolling calibration chart directly in the dashboard.
     """
-    if str(api_url).strip().lower() in {"all-in-one", "direct"}:
-        st.caption("Confidence history chart is available in Backend API mode.")
-        return
+    effective_url = _effective_api_url(api_url)
 
     try:
         response = requests.get(
-            f"{api_url.rstrip('/')}/confidence_history",
+            f"{effective_url.rstrip('/')}/confidence_history",
             params={"last_n": 200},
             timeout=HTTP_TIMEOUT_SEC,
         )
@@ -247,7 +253,7 @@ def _render_confidence_chart(api_url: str) -> None:
         samples = payload.get("samples", [])
 
     except Exception as exc:
-        st.caption(f"Confidence history fetch failed: {exc}")
+        st.caption(f"Confidence history fetch failed ({effective_url}): {exc}")
         return
 
     if not samples:
@@ -262,7 +268,6 @@ def _render_confidence_chart(api_url: str) -> None:
     if len(df) > 500:
         cutoff = df["timestamp"].max() - timedelta(days=7)
         df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
-
     # Stats row
     if stats:
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -538,10 +543,12 @@ else:
 st.sidebar.markdown("---")
 with st.sidebar.expander("Diagnostics", expanded=False):
     st.caption("Fetch raw backend analytics payload")
-    if str(api_url).strip().lower() in {"all-in-one", "direct"}:
-        st.caption("Diagnostics HTTP fetch is available in Backend API mode.")
-    elif st.button("Check /momentum/analytics", key="diag_momentum_analytics"):
-        analytics_url = f"{api_url.rstrip('/')}/momentum/analytics"
+    effective_url = _effective_api_url(api_url)
+    if effective_url == INTERNAL_API_URL:
+        st.caption(f"Using internal API URL in all-in-one mode: {effective_url}")
+
+    if st.button("Check /momentum/analytics", key="diag_momentum_analytics"):
+        analytics_url = f"{effective_url.rstrip('/')}/momentum/analytics"
         try:
             response = requests.get(
                 analytics_url,
@@ -555,9 +562,10 @@ with st.sidebar.expander("Diagnostics", expanded=False):
             except Exception:
                 st.text(response.text[:1500])
         except Exception as exc:
-            st.error(f"Diagnostics request failed: {exc}")
-    elif st.button("Check /momentum/orders-sync", key="diag_momentum_orders_sync"):
-        sync_url = f"{api_url.rstrip('/')}/momentum/orders-sync"
+            st.error(f"Diagnostics request failed ({effective_url}): {exc}")
+
+    if st.button("Check /momentum/orders-sync", key="diag_momentum_orders_sync"):
+        sync_url = f"{effective_url.rstrip('/')}/momentum/orders-sync"
         try:
             response = requests.get(
                 sync_url,
@@ -571,11 +579,12 @@ with st.sidebar.expander("Diagnostics", expanded=False):
             except Exception:
                 st.text(response.text[:1500])
         except Exception as exc:
-            st.error(f"Diagnostics request failed: {exc}")
-    elif st.button("Check /confidence_diagnostic", key="diag_confidence"):
+            st.error(f"Diagnostics request failed ({effective_url}): {exc}")
+
+    if st.button("Check /confidence_diagnostic", key="diag_confidence"):
         try:
             response = requests.get(
-                f"{api_url.rstrip('/')}/confidence_diagnostic",
+                f"{effective_url.rstrip('/')}/confidence_diagnostic",
                 timeout=HTTP_TIMEOUT_SEC,
             )
             payload = response.json()
@@ -618,12 +627,12 @@ with st.sidebar.expander("Diagnostics", expanded=False):
                 st.json(payload)
 
         except Exception as exc:
-            st.error(f"Confidence diagnostic failed: {exc}")
+            st.error(f"Confidence diagnostic failed ({effective_url}): {exc}")
 
-    elif st.button("Check /confidence_history", key="diag_confidence_history"):
+    if st.button("Check /confidence_history", key="diag_confidence_history"):
         try:
             response = requests.get(
-                f"{api_url.rstrip('/')}/confidence_history",
+                f"{effective_url.rstrip('/')}/confidence_history",
                 params={"last_n": 50},
                 timeout=HTTP_TIMEOUT_SEC,
             )
@@ -667,7 +676,7 @@ with st.sidebar.expander("Diagnostics", expanded=False):
                 st.info("No confidence samples yet — wait for signals.")
 
         except Exception as exc:
-            st.error(f"Confidence history failed: {exc}")
+            st.error(f"Confidence history failed ({effective_url}): {exc}")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Risk Preview")

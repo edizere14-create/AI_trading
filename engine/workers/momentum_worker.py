@@ -1970,6 +1970,19 @@ class MomentumWorker:
                         gate_snapshot,
                     )
                     self.last_decision_reason = gate_reason
+                    self.signal_history.append(
+                        {
+                            "symbol": str(signal.get("symbol", self.symbol)),
+                            "side": side,
+                            "quantity": float(signal.get("quantity", 0.0) or 0.0),
+                            "status": "blocked",
+                            "reason": gate_reason,
+                            "block_reason": gate_reason,
+                            "gate_snapshot": gate_snapshot,
+                            "confidence_pct": float(gate_snapshot.get("confidence_pct", 0.0) or 0.0),
+                            "timestamp": signal.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
                     return
 
             signal = self._apply_live_order_preferences(signal)
@@ -2251,6 +2264,17 @@ class MomentumWorker:
             "avg_fill_price": avg_fill_price,  # ← ENSURE THIS
             "order_id": (result or {}).get("id"),
             "timestamp": (result or {}).get("timestamp") or signal.get("timestamp"),
+            "reason": (result or {}).get("reason") or (result or {}).get("error") or None,
+            "block_reason": (result or {}).get("reason") if status == "blocked" else None,
+            "confidence_pct": float(
+                (
+                    (signal.get("gate_snapshot") or {}).get("confidence_pct")
+                    if isinstance(signal.get("gate_snapshot"), dict)
+                    else signal.get("confidence_pct", signal.get("confidence", 0.0))
+                )
+                or 0.0
+            ),
+            "gate_snapshot": signal.get("gate_snapshot") if isinstance(signal.get("gate_snapshot"), dict) else {},
         }
 
         return order_record, trade_record
