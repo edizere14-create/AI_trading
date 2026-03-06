@@ -1642,14 +1642,26 @@ class MomentumWorker:
         max_position_pct = float(max(0.0, getattr(self.risk_manager, "max_position_pct", 1.0)))
         risk_notional_cap = equity * max_position_pct
         leverage_notional_target = equity * target_leverage
-        desired_notional = min(leverage_notional_target, risk_notional_cap)
+        desired_notional = min(leverage_notional_target, risk_notional_cap * 0.995)
+        max_contracts_limit = int(max(1, getattr(self.execution_engine, "max_contracts_hard_limit", 5)))
 
         symbol = str(signal.get("symbol", self.symbol))
 
-        def _min_contract_notional(sym: str) -> float:
+        def _contract_bounds(sym: str) -> tuple[float, float, float, bool, float]:
             contract_size = float(self.execution_engine.get_contract_size(sym) or 1.0)
             inverse = bool(self.execution_engine._is_inverse_market(sym))
-            return contract_size if inverse else (contract_size * float(reference_price))
+            min_notional = contract_size if inverse else (contract_size * float(reference_price))
+            max_notional = (
+                max_contracts_limit * contract_size
+                if inverse
+                else max_contracts_limit * contract_size * float(reference_price)
+            )
+            max_base_qty = (
+                (max_contracts_limit * contract_size) / float(reference_price)
+                if inverse
+                else (max_contracts_limit * contract_size)
+            )
+            return min_notional, max_notional, max_base_qty, inverse, contract_size
 
         def _related_symbol_candidates(primary_symbol: str) -> list[str]:
             candidates: list[str] = [primary_symbol]
@@ -1703,19 +1715,37 @@ class MomentumWorker:
                 dedup.append(key)
             return dedup
 
-        min_contract_notional = _min_contract_notional(symbol)
+        min_contract_notional, max_contract_notional, max_qty_by_contract, _inverse, _contract_size = _contract_bounds(symbol)
         chosen_symbol = symbol
+        chosen_notional = min(desired_notional, max_contract_notional)
+        chosen_max_qty_by_contract = max_qty_by_contract
 
-        if desired_notional < min_contract_notional:
-            candidates = _related_symbol_candidates(symbol)
-            for candidate in candidates[1:]:
-                candidate_min_notional = _min_contract_notional(candidate)
-                if desired_notional >= candidate_min_notional:
-                    chosen_symbol = candidate
-                    min_contract_notional = candidate_min_notional
-                    break
+        candidates = _related_symbol_candidates(symbol)
+        best_symbol = chosen_symbol
+        best_min_notional = min_contract_notional
+        best_max_notional = max_contract_notional
+        best_max_qty = chosen_max_qty_by_contract
+        best_effective_notional = chosen_notional if chosen_notional >= min_contract_notional else -1.0
 
-        if desired_notional < min_contract_notional:
+        for candidate in candidates[1:]:
+            cand_min_notional, cand_max_notional, cand_max_qty, _cand_inverse, _cand_contract_size = _contract_bounds(candidate)
+            cand_effective_notional = min(desired_notional, cand_max_notional)
+            if cand_effective_notional < cand_min_notional:
+                continue
+            if cand_effective_notional > best_effective_notional:
+                best_symbol = candidate
+                best_min_notional = cand_min_notional
+                best_max_notional = cand_max_notional
+                best_max_qty = cand_max_qty
+                best_effective_notional = cand_effective_notional
+
+        chosen_symbol = best_symbol
+        min_contract_notional = best_min_notional
+        max_contract_notional = best_max_notional
+        chosen_max_qty_by_contract = best_max_qty
+        chosen_notional = best_effective_notional
+
+        if chosen_notional < min_contract_notional:
             signal["auto_size_blocked"] = True
             signal["auto_size_reason"] = (
                 f"min_contract_notional_exceeds_budget:{desired_notional:.2f}<{min_contract_notional:.2f}"
@@ -1730,15 +1760,28 @@ class MomentumWorker:
             signal["auto_size_symbol_from"] = symbol
             signal["auto_size_symbol_to"] = chosen_symbol
 
-        sized_qty = desired_notional / float(reference_price)
-        sized_qty = max(self.entry_auto_size_min_qty, min(sized_qty, self.entry_auto_size_max_qty))
+        sized_qty = chosen_notional / float(reference_price)
+        sized_qty = min(sized_qty, self.entry_auto_size_max_qty, chosen_max_qty_by_contract)
+        if sized_qty <= 0:
+            signal["auto_size_blocked"] = True
+            signal["auto_size_reason"] = "non_positive_sized_quantity"
+            signal["quantity"] = 0.0
+            signal["equity"] = float(equity)
+            return signal
+
+        min_qty_floor = self.entry_auto_size_min_qty
+        max_qty_feasible = min(self.entry_auto_size_max_qty, chosen_max_qty_by_contract)
+        if min_qty_floor <= max_qty_feasible:
+            sized_qty = max(min_qty_floor, sized_qty)
 
         signal["quantity"] = float(sized_qty)
         signal["equity"] = float(equity)
         signal["expected_price"] = signal.get("expected_price") or float(reference_price)
         signal["auto_sized"] = True
-        signal["auto_size_notional"] = float(desired_notional)
+        signal["auto_size_notional"] = float(signal["quantity"] * float(reference_price))
         signal["auto_size_target_leverage"] = float(target_leverage)
+        signal["auto_size_contract_notional_cap"] = float(max_contract_notional)
+        signal["auto_size_contract_limit"] = int(max_contracts_limit)
 
         logger.info(
             "Auto-sized entry | symbol=%s side=%s equity=%.2f price=%.2f qty=%.6f notional=%.2f target_lev=%.2f",
@@ -1747,7 +1790,7 @@ class MomentumWorker:
             equity,
             reference_price,
             signal["quantity"],
-            desired_notional,
+            signal["auto_size_notional"],
             target_leverage,
         )
         return signal
