@@ -22,6 +22,7 @@ try:
 except ImportError:
     from app.strategies.momentum import RSIStrategy as MomentumStrategy
 from app.services.data_service import DataService
+from app.monitoring.alert_manager import AlertManager
 try:
     from app.services.trade_store import trade_store
 except ImportError:
@@ -1245,6 +1246,14 @@ class MomentumWorker:
                 "Native stop placed | symbol=%s side=%s stop_price=%.2f qty=%.6f order_id=%s",
                 exchange_symbol, stop_side, stop_price, amount, order_id,
             )
+            try:
+                AlertManager.instance().send(
+                    "info", "Stop Loss Placed",
+                    f"Native stop {stop_side.upper()} @ {stop_price:,.2f} for {symbol}",
+                    {"stop_order_id": order_id, "stop_price": f"{stop_price:,.2f}"},
+                )
+            except Exception:
+                pass
             return order_id
 
         except Exception as exc:
@@ -2682,6 +2691,11 @@ class MomentumWorker:
             drawdown = status.get("drawdown_pct", 0)
             if drawdown > 20.0:
                 logger.critical("🛑 MAX DRAWDOWN BREACHED (%.2f%%) - STOPPING STRATEGY", drawdown)
+                AlertManager.instance().send(
+                    "critical", "Max Drawdown Breached",
+                    f"Drawdown {drawdown:.2f}% exceeded limit — strategy stopped",
+                    {"drawdown_pct": round(drawdown, 2), "symbol": self.symbol},
+                )
                 self.last_decision_reason = "stopped_max_drawdown"
                 await self.stop()
                 return
@@ -2722,6 +2736,11 @@ class MomentumWorker:
                     self.last_decision_reason = "exit_pending_order"
                     return
                 logger.info("Executing exit logic signal: %s", exit_signal)
+                AlertManager.instance().send(
+                    "warning", "Exit Signal",
+                    f"Closing {exit_signal.get('symbol', self.symbol)} {exit_signal.get('side', '?')} — {exit_signal.get('exit_reason', 'unknown')}",
+                    {"symbol": str(exit_signal.get('symbol', self.symbol)), "reason": str(exit_signal.get('exit_reason', 'unknown'))},
+                )
                 self.last_decision_reason = f"executing_exit:{str(exit_signal.get('exit_reason', 'unknown'))}"
                 exit_result = self.execution_engine.execute(exit_signal)
                 exit_status = str((exit_result or {}).get("status", "")).lower()
@@ -2737,6 +2756,19 @@ class MomentumWorker:
                 if trade_record:
                     self.trade_history.append(trade_record)
                     self._persist_trade(trade_record)
+                    try:
+                        AlertManager.instance().send(
+                            "info", "Trade Closed",
+                            f"Net PnL: ${float(trade_record.get('pnl', 0)):+.2f} | {str(exit_signal.get('exit_reason', 'unknown'))}",
+                            {
+                                "entry": f"${float(trade_record.get('entry_price', 0)):,.2f}",
+                                "exit": f"${float(trade_record.get('exit_price', 0)):,.2f}",
+                                "fees": f"${abs(float(trade_record.get('fees') or 0)):.4f}",
+                                "symbol": str(exit_signal.get("symbol", self.symbol)),
+                            },
+                        )
+                    except Exception:
+                        pass
                     # Cancel native stop on exit
                     exit_sym = str(exit_signal.get("symbol", self.symbol))
                     await self._cancel_native_stop(exit_sym)
@@ -2930,6 +2962,11 @@ class MomentumWorker:
                         return
 
                     logger.info("Order placed: %s", result.get("id", result))
+                    AlertManager.instance().send(
+                        "info", "Entry Order Placed",
+                        f"{side.upper()} {signal.get('symbol', self.symbol)} qty={signal.get('quantity')}",
+                        {"order_id": str(result.get('id', '')), "side": side, "symbol": str(signal.get('symbol', self.symbol))},
+                    )
                     self.last_decision_reason = "entry_submitted"
                     await self._sync_live_exchange_state()
                 else:
@@ -2938,8 +2975,13 @@ class MomentumWorker:
                     logger.warning("Execution returned no result")
                     self.last_decision_reason = "entry_execution_returned_none"
                     await self._sync_live_exchange_state()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Order execution failed")
+                AlertManager.instance().send(
+                    "critical", "Execution Failed",
+                    f"Order execution error: {exc}",
+                    {"symbol": str(signal.get('symbol', self.symbol)), "error": str(exc)[:200]},
+                )
                 self.last_decision_reason = "entry_execution_exception"
 
         except Exception as e:
@@ -3260,6 +3302,11 @@ class MomentumWorker:
                 self.trade_history.append(trade_record)
                 self._persist_trade(trade_record)
 
+                AlertManager.instance().send(
+                "warning", "Force Close",
+                f"Manually closed {symbol} {close_side}",
+                {"symbol": symbol, "side": close_side, "qty": qty},
+            )
             results.append({"symbol": symbol, "result": result})
 
         return {"status": "closed", "results": results}

@@ -704,35 +704,145 @@ def render_portfolio(api_url: str) -> None:
 
 
 def render_backtesting(api_url: str) -> None:
+    import requests as _requests
     st.subheader("Backtesting Dashboard")
-    d = st.slider("Lookback (days)", min_value=30, max_value=365, value=90, step=15)
-    try:
-        bt = get_backtest(api_url, lookback_days=d)
-    except ApiContractError as e:
-        st.error(str(e))
-        st.stop()
 
-    stats = bt.get("stats", {})
-    analytics = bt.get("analytics", {})
-    profit_factor = float(analytics.get("profit_factor", stats.get("profit_factor", 0)) or 0)
-    total_return_pct = float(analytics.get("total_return_pct", stats.get("total_return_pct", 0)) or 0)
+    # ── Controls ──────────────────────────────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    symbol      = col1.text_input("Symbol",        "PF_XBTUSD")
+    days        = col2.slider("History Days",       7, 90, 30)
+    window_days = col3.slider("Window Days",        3, 14, 7)
+    initial_eq  = col4.number_input("Initial Equity ($)", 100.0, 100000.0, 5000.0, 100.0)
 
+    use_gate_logic = st.checkbox(
+        "Use live gate logic (walk-forward)",
+        value=True,
+        help="Runs the same entry gates as the live worker. Slower but realistic.",
+    )
+
+    run_clicked = st.button("▶ Run Backtest", type="primary", use_container_width=True)
+
+    if run_clicked:
+        with st.spinner("Running backtest..."):
+            effective_url = str(api_url).strip().rstrip("/")
+            if effective_url in {"all-in-one", "direct"}:
+                effective_url = "http://127.0.0.1:8000"
+
+            if use_gate_logic:
+                try:
+                    resp = _requests.post(
+                        f"{effective_url}/backtest/run",
+                        params={
+                            "symbol":         symbol,
+                            "days":           days,
+                            "window_days":    window_days,
+                            "initial_equity": initial_eq,
+                        },
+                        timeout=120,
+                    )
+                    if resp.status_code == 200:
+                        st.session_state["bt_result"] = resp.json()
+                        st.session_state["bt_mode"]   = "walk_forward"
+                    else:
+                        st.warning(f"Walk-forward backtest returned HTTP {resp.status_code} — falling back to SMA crossover.")
+                        use_gate_logic = False
+                except Exception as exc:
+                    st.warning(f"Walk-forward backtest failed ({exc}) — falling back to SMA crossover.")
+                    use_gate_logic = False
+
+            if not use_gate_logic:
+                try:
+                    bt = get_backtest(api_url, lookback_days=days)
+                    st.session_state["bt_result"] = bt
+                    st.session_state["bt_mode"]   = "sma_crossover"
+                except ApiContractError as exc:
+                    st.error(str(exc))
+                    return
+
+    result = st.session_state.get("bt_result")
+    mode   = st.session_state.get("bt_mode", "sma_crossover")
+
+    if result is None:
+        st.info("Configure parameters above and click **Run Backtest**.")
+        return
+
+    # ── Walk-forward results ───────────────────────────────────────────────
+    if mode == "walk_forward":
+        agg = result.get("aggregate", {})
+        signal      = result.get("signal", "red")
+        signal_text = result.get("signal_text", "")
+
+        if signal == "green":
+            st.success(signal_text)
+        elif signal == "yellow":
+            st.warning(signal_text)
+        else:
+            st.error(signal_text)
+
+        st.caption(
+            f"Walk-forward | {result.get('windows', 0)} windows | "
+            f"{result.get('total_trades', 0)} total trades"
+        )
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Net PnL",      f"${agg.get('net_pnl', 0):,.2f}")
+        m2.metric("Mean Sharpe",  f"{agg.get('mean_sharpe', 0):.3f}")
+        m3.metric("Win Rate",     f"{agg.get('mean_win_rate', 0):.1f}%")
+        m4.metric("Max Drawdown", f"{agg.get('mean_max_dd', 0):.1f}%")
+        m5.metric("Profit Factor",f"{agg.get('mean_pf', 0):.2f}")
+        m6.metric("Total Fees",   f"${agg.get('total_fees', 0):,.4f}")
+
+        windows = result.get("windows_detail", [])
+        if windows:
+            wdf = pd.DataFrame(windows)
+            wdf["start"] = pd.to_datetime(wdf["start"])
+
+            tab1, tab2, tab3 = st.tabs(["Net PnL per Window", "Sharpe per Window", "Win Rate per Window"])
+            with tab1:
+                st.bar_chart(wdf.set_index("start")["net_pnl"])
+            with tab2:
+                st.line_chart(wdf.set_index("start")["sharpe"])
+            with tab3:
+                st.line_chart(wdf.set_index("start")["win_rate"])
+
+            wdf["equity_curve"] = wdf["net_pnl"].cumsum() + initial_eq
+            st.subheader("Cumulative Equity Curve")
+            st.line_chart(wdf.set_index("start")["equity_curve"])
+
+            st.subheader("Window Detail")
+            st.dataframe(
+                wdf[["start", "trades", "net_pnl", "sharpe", "win_rate", "max_dd", "pf"]].rename(
+                    columns={"net_pnl": "Net PnL", "win_rate": "Win Rate %",
+                             "max_dd": "Max DD %", "pf": "Profit Factor"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        return
+
+    # ── SMA crossover fallback results ────────────────────────────────────
+    stats        = result.get("stats", {})
+    analytics    = result.get("analytics", {})
+    profit_factor    = float(analytics.get("profit_factor",     stats.get("profit_factor",    0)) or 0)
+    total_return_pct = float(analytics.get("total_return_pct",  stats.get("total_return_pct", 0)) or 0)
+
+    st.caption("SMA-crossover simulation (gate logic backtest unavailable)")
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.metric("Net PnL", f"${float(stats.get('net_pnl', 0)):,.2f}")
-    c2.metric("Return %", f"{total_return_pct:.2f}%")
-    c3.metric("Win Rate", f"{float(stats.get('win_rate', 0)):.2f}%")
-    c4.metric("Sharpe", f"{float(stats.get('sharpe', 0)):.2f}")
-    c5.metric("Max Drawdown", f"{float(stats.get('max_drawdown', 0)):.2f}%")
+    c1.metric("Net PnL",       f"${float(stats.get('net_pnl', 0)):,.2f}")
+    c2.metric("Return %",      f"{total_return_pct:.2f}%")
+    c3.metric("Win Rate",      f"{float(stats.get('win_rate', 0)):.2f}%")
+    c4.metric("Sharpe",        f"{float(stats.get('sharpe', 0)):.2f}")
+    c5.metric("Max Drawdown",  f"{float(stats.get('max_drawdown', 0)):.2f}%")
     c6.metric("Profit Factor", f"{profit_factor:.2f}")
-    c7.metric("Trades", f"{int(stats.get('trades', 0))}")
+    c7.metric("Trades",        f"{int(stats.get('trades', 0))}")
 
-    curve = pd.DataFrame(bt.get("equity_curve", []))
-    if not curve.empty:
+    curve = pd.DataFrame(result.get("equity_curve", []))
+    if not curve.empty and "t" in curve.columns and "equity" in curve.columns:
         fig = go.Figure(go.Scatter(x=curve["t"], y=curve["equity"], mode="lines", name="Equity Curve"))
         fig.update_layout(template="plotly_dark", height=420, margin=dict(l=8, r=8, t=24, b=8))
         st.plotly_chart(fig, use_container_width=True)
 
-    monthly = bt.get("monthly_performance", [])
+    monthly = result.get("monthly_performance", [])
     if monthly:
         mdf = pd.DataFrame(monthly)
         st.subheader("Monthly Performance")

@@ -231,6 +231,23 @@ def _effective_api_url(api_url: str) -> str:
     return str(api_url or "").strip()
 
 
+def _render_alert_banner(api_url: str) -> None:
+    """Fetch recent alerts from FastAPI and render critical/warning banners."""
+    effective_url = _effective_api_url(api_url)
+    try:
+        resp   = requests.get(f"{effective_url.rstrip('/')}/momentum/alerts", params={"limit": 10}, timeout=2)
+        alerts = resp.json().get("alerts", [])
+    except Exception:
+        return  # never break dashboard for alert failure
+
+    critical = [a for a in alerts if a.get("level") == "critical"]
+    warnings = [a for a in alerts if a.get("level") == "warning"]
+    for a in critical:
+        st.error(f"🚨 **{a['title']}** — {a['message']}  `{str(a.get('timestamp',''))[:19]}`")
+    for a in warnings:
+        st.warning(f"⚠️ **{a['title']}** — {a['message']}  `{str(a.get('timestamp',''))[:19]}`")
+
+
 def _render_confidence_chart(api_url: str) -> None:
     """
     Fetches confidence history from FastAPI and renders
@@ -881,6 +898,7 @@ if st.sidebar.button("🧪 PAPER LONG", use_container_width=True):
         st.sidebar.error(str(exc))
 
 if page == "Dashboard":
+    _render_alert_banner(api_url)
     render_dashboard(
         api_url=api_url,
         stream=stream,

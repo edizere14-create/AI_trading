@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import inspect
 import math
+import os
 import urllib.parse
 
 import requests
@@ -642,3 +643,214 @@ async def backtest_analytics(
             return _trim_analytics(analytics)
         except Exception:
             return BacktestAnalytics(symbol=symbol, timeframe=timeframe, days=days)
+
+
+@router.post("/run")
+async def run_walk_forward_backtest(
+    symbol:         str   = Query("PF_XBTUSD"),
+    days:           int   = Query(30, ge=7,  le=365),
+    window_days:    int   = Query(7,  ge=3,  le=30),
+    step_days:      int   = Query(1,  ge=1,  le=7),
+    initial_equity: float = Query(5000.0),
+) -> dict:
+    """
+    Walk-forward backtest using the live worker's gate logic.
+    Each window runs _entry_gate_allows_execution on historical candles.
+    Requires momentum worker to be initialized.
+    """
+    import numpy as np
+    from app.api import routes_momentum
+
+    worker = routes_momentum.momentum_worker
+    if worker is None:
+        raise HTTPException(503, "Momentum worker not initialized — start the worker first")
+
+    candles_raw = await asyncio.to_thread(
+        _fetch_public_candles_sync, symbol, "1m", days
+    )
+    if not candles_raw or len(candles_raw) < 100:
+        raise HTTPException(404, f"Insufficient historical data for {symbol} ({len(candles_raw) if candles_raw else 0} candles)")
+
+    import pandas as pd
+    candles_df = pd.DataFrame(candles_raw)
+    candles_df["timestamp"] = pd.to_datetime(candles_df["timestamp"], errors="coerce", utc=True)
+    candles_df = candles_df.sort_values("timestamp").reset_index(drop=True)
+
+    fee_rate   = float(os.getenv("BACKTEST_FEE_RATE",   "0.0002"))
+    slip_bps   = float(os.getenv("BACKTEST_SLIP_BPS",   "5.0")) / 10_000
+    sl_pct     = float(os.getenv("MOMENTUM_NATIVE_STOP_LOSS_PCT", "0.02"))
+    tp_pct     = float(os.getenv("BACKTEST_TP_PCT",     "0.04"))
+    max_hold   = int(os.getenv("BACKTEST_MAX_HOLD_BARS","60"))
+
+    results: list[dict]    = []
+    all_trades: list[dict] = []
+    window_td  = pd.Timedelta(days=window_days)
+    step_td    = pd.Timedelta(days=step_days)
+    cursor     = candles_df["timestamp"].iloc[0]
+    end_ts     = candles_df["timestamp"].iloc[-1]
+    min_bars   = 52
+
+    while cursor + window_td <= end_ts:
+        w_end   = cursor + window_td
+        mask    = (candles_df["timestamp"] >= cursor) & (candles_df["timestamp"] < w_end)
+        wdf     = candles_df[mask].copy().reset_index(drop=True)
+
+        if len(wdf) < min_bars + 10:
+            cursor += step_td
+            continue
+
+        equity   = float(initial_equity)
+        eq_curve = [equity]
+        trades: list[dict]  = []
+        position = None
+
+        for i in range(min_bars, len(wdf)):
+            visible = wdf.iloc[:i].copy()
+            bar     = wdf.iloc[i]
+            price   = float(bar["close"])
+
+            # ── Exit ─────────────────────────────────────────
+            if position is not None:
+                held = i - position["bar"]
+                ep   = position["entry"]
+                side = position["side"]
+                pnl_pct = ((price - ep) / ep) if side == "buy" else ((ep - price) / ep)
+
+                reason = None
+                if pnl_pct <= -sl_pct:
+                    reason = "stop_loss"
+                elif pnl_pct >= tp_pct:
+                    reason = "take_profit"
+                elif held >= max_hold:
+                    reason = "time_stop"
+
+                if reason:
+                    fill   = price * (1 + slip_bps) if side == "sell" else price * (1 - slip_bps)
+                    qty    = position["qty"]
+                    gross  = (fill - ep) * qty if side == "buy" else (ep - fill) * qty
+                    fees   = (ep * qty + fill * qty) * fee_rate
+                    net    = gross - fees
+                    equity += net
+                    eq_curve.append(equity)
+                    trades.append({
+                        "side": side, "entry": ep, "exit": fill,
+                        "gross": round(gross, 6), "fees": round(fees, 6),
+                        "net": round(net, 6), "reason": reason,
+                    })
+                    position = None
+                    continue
+
+            # ── Entry ─────────────────────────────────────────
+            if position is None and equity > 0:
+                for side in ("sell", "buy"):
+                    try:
+                        allowed, _, _ = worker._entry_gate_allows_execution(visible, side)
+                    except Exception:
+                        allowed = False
+                    if allowed:
+                        fill = price * (1 + slip_bps) if side == "buy" else price * (1 - slip_bps)
+                        risk_notional = equity * sl_pct
+                        per_unit_risk = fill * sl_pct
+                        qty  = (risk_notional / per_unit_risk) if per_unit_risk > 0 else 0.0
+                        if qty <= 0:
+                            continue
+                        fees = fill * qty * fee_rate
+                        equity -= fees
+                        position = {"side": side, "entry": fill, "bar": i, "qty": qty}
+                        break
+
+        # Force-close at window end
+        if position is not None:
+            fill  = float(wdf.iloc[-1]["close"])
+            qty   = position["qty"]
+            ep    = position["entry"]
+            side  = position["side"]
+            gross = (fill - ep) * qty if side == "buy" else (ep - fill) * qty
+            fees  = (ep * qty + fill * qty) * fee_rate
+            net   = gross - fees
+            equity += net
+            eq_curve.append(equity)
+            trades.append({
+                "side": side, "entry": ep, "exit": fill,
+                "gross": round(gross, 6), "fees": round(fees, 6),
+                "net": round(net, 6), "reason": "window_end",
+            })
+
+        # Metrics
+        net_pnls   = [t["net"] for t in trades]
+        wins       = [p for p in net_pnls if p > 0]
+        losses_abs = [abs(p) for p in net_pnls if p < 0]
+        n_trades   = len(net_pnls)
+        win_rate   = (len(wins) / n_trades * 100) if n_trades else 0.0
+        net_total  = sum(net_pnls)
+        gross_w    = sum(wins)
+        gross_l    = sum(losses_abs)
+        pf         = (gross_w / gross_l) if gross_l > 0 else (float("inf") if gross_w > 0 else 0.0)
+
+        peak = eq_curve[0]
+        max_dd = 0.0
+        for eq in eq_curve:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak if peak > 0 else 0.0
+            if dd > max_dd:
+                max_dd = dd
+
+        rets   = [t["net"] / float(initial_equity) for t in trades]
+        mu     = float(np.mean(rets)) if rets else 0.0
+        std    = float(np.std(rets, ddof=1)) if len(rets) > 1 else 0.0
+        sharpe = (mu / std * math.sqrt(len(rets))) if std > 0 else 0.0
+
+        results.append({
+            "start":    cursor.isoformat(),
+            "end":      w_end.isoformat(),
+            "trades":   n_trades,
+            "net_pnl":  round(net_total, 4),
+            "win_rate": round(win_rate, 2),
+            "sharpe":   round(sharpe, 4),
+            "max_dd":   round(max_dd * 100, 2),
+            "pf":       round(pf, 4) if math.isfinite(pf) else 999.0,
+        })
+        all_trades.extend(trades)
+        cursor += step_td
+
+    if not results:
+        return {"windows": 0, "message": "Not enough data — try more days or smaller window"}
+
+    sharpes    = [r["sharpe"]   for r in results if r["trades"] > 0]
+    net_pnls_a = [r["net_pnl"]  for r in results]
+    win_rates  = [r["win_rate"] for r in results]
+    max_dds    = [r["max_dd"]   for r in results]
+    pfs        = [r["pf"]       for r in results if r["pf"] < 500]
+
+    total_fees = sum(abs(t["fees"]) for t in all_trades)
+    aggregate_net = sum(net_pnls_a)
+    mean_sharpe   = float(np.mean(sharpes)) if sharpes else 0.0
+
+    # Signal light
+    if mean_sharpe > 1.0 and (sum(1 for w in win_rates if w > 50) / max(len(win_rates), 1)) > 0.5 and aggregate_net > 0:
+        signal = "green"
+        signal_text = "✅ Positive expectancy — safe to run on demo"
+    elif mean_sharpe > 0 and aggregate_net > 0:
+        signal = "yellow"
+        signal_text = "⚠️ Marginally positive — reduce position size before live"
+    else:
+        signal = "red"
+        signal_text = "❌ Negative expectancy — do not trade live with this configuration"
+
+    return {
+        "windows":      len(results),
+        "total_trades": len(all_trades),
+        "signal":       signal,
+        "signal_text":  signal_text,
+        "aggregate": {
+            "net_pnl":       round(aggregate_net, 2),
+            "total_fees":    round(total_fees, 4),
+            "mean_sharpe":   round(mean_sharpe, 4),
+            "min_sharpe":    round(float(np.min(sharpes)), 4) if sharpes else 0.0,
+            "mean_win_rate": round(float(np.mean(win_rates)), 2),
+            "mean_max_dd":   round(float(np.mean(max_dds)), 2),
+            "mean_pf":       round(float(np.mean(pfs)), 4) if pfs else 0.0,
+        },
+        "windows_detail": results,
+    }
