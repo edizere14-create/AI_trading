@@ -825,12 +825,13 @@ def get_open_orders(api_url: str, limit: int = 100) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
+def get_candles(api_url: str, limit: int = 300, timeframe: str | None = None) -> pd.DataFrame:
+    chart_tf = timeframe or os.getenv("CHART_TIMEFRAME", "5m")
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
         symbol = _kraken_symbol()
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=max(50, int(limit)))
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=chart_tf, limit=max(50, int(limit)))
         except Exception as exc:
             raise _format_kraken_exchange_error("fetch Kraken candles", exc) from exc
         rows = [
@@ -850,8 +851,8 @@ def get_candles(api_url: str, limit: int = 300) -> pd.DataFrame:
     candle_payload: Any = None
     errors: list[str] = []
     endpoints = [
-        (f"{api_url}/data/kraken/ohlcv", {"symbol": requested_symbol, "timeframe": "1m", "limit": max(50, int(limit))}),
-        (f"{api_url}/data/ohlcv", {"symbol": requested_symbol, "timeframe": "1m", "limit": max(50, int(limit))}),
+        (f"{api_url}/data/kraken/ohlcv", {"symbol": requested_symbol, "timeframe": chart_tf, "limit": max(50, int(limit))}),
+        (f"{api_url}/data/ohlcv", {"symbol": requested_symbol, "timeframe": chart_tf, "limit": max(50, int(limit))}),
         (f"{api_url}/momentum/history", {"limit": limit}),
     ]
     for url, params in endpoints:
