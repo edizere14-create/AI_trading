@@ -303,6 +303,18 @@ def _metric_bar(metrics: Mapping[str, Any]) -> None:
 
 
 def _chart(df: pd.DataFrame, ai: Mapping[str, Any], live_price: float) -> None:
+    # Filter outlier candles (bad ticks that distort Y-axis)
+    median_close = df["close"].median()
+    if median_close > 0:
+        lower_bound = median_close * 0.5
+        upper_bound = median_close * 2.0
+        mask = (
+            (df["low"] >= lower_bound) & (df["high"] <= upper_bound)
+            & (df["open"] >= lower_bound) & (df["close"] <= upper_bound)
+        )
+        if mask.sum() >= 10:
+            df = df[mask].copy()
+
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03)
     fig.add_trace(
         go.Candlestick(
