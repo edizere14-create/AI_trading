@@ -957,6 +957,24 @@ class ExecutionEngine:
                 except Exception as exc:
                     logger.warning("fetch_order not supported; using create_order response: %s", exc)
                     fetched = order
+                    # Market orders fill immediately; when fetchOrder is
+                    # unsupported we have no way to poll fill status, so assume
+                    # the full requested amount was filled to avoid spurious
+                    # retries (which cause "would not reduce position" errors).
+                    if order_type == "market":
+                        _assumed_price = expected_price or price or 0.0
+                        fetched = {
+                            **fetched,
+                            "filled": remaining,
+                            "cost": remaining * _assumed_price,
+                            "status": "closed",
+                        }
+                        logger.info(
+                            "Assumed market order fully filled (fetchOrder unsupported) | id=%s amount=%s price=%s",
+                            order.get("id"),
+                            remaining,
+                            _assumed_price,
+                        )
 
                 filled = float(fetched.get("filled") or 0.0)
                 cost = float(fetched.get("cost") or 0.0)
@@ -997,6 +1015,19 @@ class ExecutionEngine:
                         self.exchange.cancel_order(fetched["id"], exchange_symbol)
                     except Exception as exc:
                         logger.warning("Cancel failed for %s: %s", fetched.get("id"), exc)
+                        # "notFound" means the order already executed on-exchange.
+                        # Treat as fully filled to avoid a spurious retry.
+                        if "notFound" in str(exc) or "not found" in str(exc).lower():
+                            logger.info(
+                                "Order %s not found on exchange; assuming filled | remaining=%s",
+                                fetched.get("id"),
+                                remaining,
+                            )
+                            total_filled += remaining
+                            total_cost += remaining * (expected_price or price or 0.0)
+                            remaining = 0.0
+                            final_status = OrderStatus.FILLED.value
+                            break
 
             end_ts = time.time()
             avg_fill_price = (total_cost / total_filled) if total_filled > 0 else None

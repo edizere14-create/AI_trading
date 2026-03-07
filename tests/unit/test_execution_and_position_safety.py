@@ -69,6 +69,7 @@ class _DualMarketExchange(_DummyExchange):
             "linear": True,
         }
         self.markets["BTC/USD:USD"] = linear_market
+        self.markets_by_id["PF_XBTUSD"] = linear_market
 
 
 class _BlockingRiskManager:
@@ -446,8 +447,12 @@ def test_symbol_resolution_prefers_linear_alias_when_available() -> None:
     engine.paper_mode = False
     engine.exchange = _DualMarketExchange()
 
-    resolved = engine._resolve_exchange_symbol("PI_XBTUSD")
-    assert resolved == "BTC/USD:USD"
+    # PI_XBTUSD is inverse → BTC/USD:BTC; PF_XBTUSD is linear → BTC/USD:USD
+    resolved_inverse = engine._resolve_exchange_symbol("PI_XBTUSD")
+    assert resolved_inverse == "BTC/USD:BTC"
+
+    resolved_linear = engine._resolve_exchange_symbol("PF_XBTUSD")
+    assert resolved_linear == "BTC/USD:USD"
 
 
 def test_symbol_matching_is_strict_after_normalization() -> None:
