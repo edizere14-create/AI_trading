@@ -24,6 +24,15 @@ except ImportError:
 from app.services.data_service import DataService
 from app.monitoring.alert_manager import AlertManager
 try:
+    from engine.workers.scanner_worker import ScannerWorker, SCANNER_ENABLED
+except ImportError:
+    ScannerWorker = None  # type: ignore[misc,assignment]
+    SCANNER_ENABLED = False
+try:
+    from engine.workers.signal_classifier import SignalClassifier
+except ImportError:
+    SignalClassifier = None  # type: ignore[misc,assignment]
+try:
     from app.services.trade_store import trade_store
 except ImportError:
     class _NullTradeStore:
@@ -289,7 +298,8 @@ class MomentumWorker:
 
         # --- Multi-timeframe HTF confirmation ---
         self.htf_enabled = self._env_bool("MOMENTUM_HTF_ENABLED", True)
-        self.htf_timeframe = os.environ.get("MOMENTUM_HTF_TIMEFRAME", "1h") or "1h"
+        self.htf_timeframe = os.environ.get("MOMENTUM_HTF_TIMEFRAME", "15m") or "15m"
+        self.htf2_timeframe = os.environ.get("MOMENTUM_HTF2_TIMEFRAME", "1h") or "1h"
         try:
             self.htf_trend_agreement_weight = float(
                 os.environ.get("MOMENTUM_HTF_TREND_WEIGHT", "0.30") or "0.30"
@@ -299,6 +309,8 @@ class MomentumWorker:
         self.htf_trend_agreement_weight = max(0.0, min(self.htf_trend_agreement_weight, 1.0))
         self._htf_cache: dict[str, Any] = {}  # cached HTF context
         self._htf_cache_ts: float = 0.0
+        self._htf2_cache: dict[str, Any] = {}  # cached HTF2 context
+        self._htf2_cache_ts: float = 0.0
         try:
             self._htf_cache_ttl_sec = float(os.environ.get("MOMENTUM_HTF_CACHE_TTL_SEC", "300") or "300")
         except (TypeError, ValueError):
@@ -326,10 +338,10 @@ class MomentumWorker:
         self._active_stop_orders: dict[str, str] = {}  # symbol -> stop_order_id
 
         logger.info(
-            "Extended gates | partial_fills=%s watchdog=%s(%.0fs) htf=%s(%s) volume_gate=%s(%.2f) native_stop=%s(%.2f%%)",
+            "Extended gates | partial_fills=%s watchdog=%s(%.0fs) htf=%s(%s+%s) volume_gate=%s(%.2f) native_stop=%s(%.2f%%)",
             self.reconcile_partial_fills,
             self.watchdog_enabled, self.watchdog_max_stale_sec,
-            self.htf_enabled, self.htf_timeframe,
+            self.htf_enabled, self.htf_timeframe, self.htf2_timeframe,
             self.volume_gate_enabled, self.volume_gate_min_ratio,
             self.native_stop_enabled, self.native_stop_loss_pct * 100,
         )
@@ -496,6 +508,20 @@ class MomentumWorker:
                 enable_margin_checks=True,
                 train_fn=self._live_train_fn,
             )
+
+        # --- ML signal classifier ---
+        self.signal_classifier: Any = None
+        if SignalClassifier is not None:
+            self.signal_classifier = SignalClassifier()
+            logger.info("ML SignalClassifier initialized | min_samples=%d retrain_every=%d",
+                        self.signal_classifier.status()["min_samples"],
+                        self.signal_classifier.status()["retrain_every"])
+
+        # --- Multi-symbol scanner ---
+        self.scanner: Any = None
+        if ScannerWorker is not None and SCANNER_ENABLED:
+            self.scanner = ScannerWorker(self)
+            logger.info("ScannerWorker initialized")
 
     @staticmethod
     def _env_bool(name: str, default: bool) -> bool:
@@ -817,6 +843,22 @@ class MomentumWorker:
             )
         )
 
+        # --- Technical indicator scores ---
+        rsi_val = float(self._safe_float(context.get("rsi", 50.0), 50.0))
+        macd_histogram = float(self._safe_float(context.get("macd_histogram", 0.0), 0.0))
+        bb_pos = float(self._safe_float(context.get("bb_position", 0.5), 0.5))
+
+        # RSI score: centre at 50, scale so 70/30 -> ±0.8
+        rsi_score = self._clip_score((rsi_val - 50.0) / 25.0)
+        rsi_directional = rsi_score if side == "buy" else -rsi_score
+        # MACD histogram: sign = direction, normalise by ATR
+        _atr_ctx = float(self._safe_float(context.get("atr", 1.0), 1.0)) or 1.0
+        macd_norm = self._clip_score(macd_histogram / (_atr_ctx * 0.5)) if _atr_ctx > 0 else 0.0
+        macd_directional = macd_norm if side == "buy" else -macd_norm
+        # Bollinger position: 0.5 = neutral, >0.8 overbought, <0.2 oversold
+        bb_score = self._clip_score((bb_pos - 0.5) / 0.3)
+        bb_directional = bb_score if side == "buy" else -bb_score
+
         agreement_raw = float(self._signal_agreement_raw())
         agreement_score = abs(agreement_raw)
 
@@ -828,12 +870,15 @@ class MomentumWorker:
         )
 
         composite = (
-            0.25 * trend_score_directional
-            + 0.20 * momentum_score_directional
-            + 0.15 * vol_score
-            + 0.10 * (pattern_score if side == "buy" else -pattern_score)
-            + 0.20 * _conf_contribution
-            + 0.10 * self._clip_score(agreement_raw)
+            0.20 * trend_score_directional
+            + 0.15 * momentum_score_directional
+            + 0.10 * vol_score
+            + 0.08 * (pattern_score if side == "buy" else -pattern_score)
+            + 0.15 * _conf_contribution
+            + 0.08 * self._clip_score(agreement_raw)
+            + 0.10 * rsi_directional
+            + 0.08 * macd_directional
+            + 0.06 * bb_directional
         )
 
         side_sign = 1.0 if side == "buy" else -1.0
@@ -901,6 +946,13 @@ class MomentumWorker:
         # Volume confirmation gate
         volume_gate_ok, volume_ratio = self._volume_gate_check(context)
 
+        # RSI gate: don't buy overbought, don't sell oversold
+        rsi_gate = True
+        if side == "buy" and rsi_val > 70:
+            rsi_gate = False
+        elif side == "sell" and rsi_val < 30:
+            rsi_gate = False
+
         allowed = (
             confidence_gate
             and conviction_gate
@@ -910,6 +962,7 @@ class MomentumWorker:
             and agreement_gate
             and direction_gate
             and volume_gate_ok
+            and rsi_gate
         )
 
         # Candlestick patterns detected
@@ -951,6 +1004,14 @@ class MomentumWorker:
             "pattern_gate": pattern_gate,
             "agreement_gate": agreement_gate,
             "direction_gate": direction_gate,
+            "rsi_gate": rsi_gate,
+            # Technical indicator values
+            "rsi": float(rsi_val),
+            "macd_histogram": float(macd_histogram),
+            "bb_position": float(bb_pos),
+            "rsi_score": float(rsi_directional),
+            "macd_score": float(macd_directional),
+            "bb_score": float(bb_directional),
         }
 
         if allowed:
@@ -974,6 +1035,8 @@ class MomentumWorker:
             return False, "entry_gate_failed:countertrend", snapshot
         if not direction_gate:
             return False, "entry_gate_failed:direction", snapshot
+        if not rsi_gate:
+            return False, "entry_gate_failed:rsi_extreme", snapshot
         return False, "entry_gate_failed:unknown", snapshot
 
     # ------------------------------------------------------------------
@@ -1160,29 +1223,39 @@ class MomentumWorker:
     # (4) Multi-timeframe HTF confirmation
     # ------------------------------------------------------------------
 
-    async def _fetch_htf_context(self) -> dict[str, Any]:
+    async def _fetch_htf_context(self, timeframe: str | None = None) -> dict[str, Any]:
         """Fetch and cache higher-timeframe context metrics."""
         import time as _time
         now = _time.time()
-        if self._htf_cache and (now - self._htf_cache_ts) < self._htf_cache_ttl_sec:
-            return self._htf_cache
+        tf = timeframe or self.htf_timeframe
+        # Pick the right cache slot
+        if tf == self.htf2_timeframe:
+            cache, cache_ts = self._htf2_cache, self._htf2_cache_ts
+        else:
+            cache, cache_ts = self._htf_cache, self._htf_cache_ts
+        if cache and (now - cache_ts) < self._htf_cache_ttl_sec:
+            return cache
 
         try:
             htf_candles = await self._load_ohlcv(
                 symbol=self.symbol,
-                timeframe=self.htf_timeframe,
+                timeframe=tf,
                 limit=50,
             )
             if htf_candles is not None and not htf_candles.empty:
                 ctx = self._compute_context_metrics(htf_candles)
                 if ctx:
-                    self._htf_cache = ctx
-                    self._htf_cache_ts = now
+                    if tf == self.htf2_timeframe:
+                        self._htf2_cache = ctx
+                        self._htf2_cache_ts = now
+                    else:
+                        self._htf_cache = ctx
+                        self._htf_cache_ts = now
                     return ctx
         except Exception as exc:
-            logger.debug("HTF fetch failed (%s): %s", self.htf_timeframe, exc)
+            logger.debug("HTF fetch failed (%s): %s", tf, exc)
 
-        return self._htf_cache or {}
+        return cache or {}
 
     def _htf_trend_agrees(self, side: str, htf_context: dict[str, Any]) -> tuple[bool, float]:
         """Check if higher-timeframe trend agrees with proposed entry side."""
@@ -1382,6 +1455,12 @@ class MomentumWorker:
         vol_ratio = (vol_last / vol_ma20) if vol_ma20 > 0 else 1.0
         correlation = self._correlation_spike(candles)
 
+        # --- Technical Indicators: RSI, MACD, Bollinger Bands ---
+        rsi_val = self._rsi(close)
+        macd_line, macd_sig = self._macd(close)
+        macd_histogram = macd_line - macd_sig
+        bb_pos = self._bb_position(close)
+
         # Real candlestick pattern detection
         candle_patterns = self._detect_candlestick_patterns(candles)
         # Blend body-ratio pattern score with real pattern detection (50/50)
@@ -1414,7 +1493,56 @@ class MomentumWorker:
             "correlation": float(correlation),
             "reversal_long": self._strong_reversal_against_trend(candles, "buy", sma20),
             "reversal_short": self._strong_reversal_against_trend(candles, "sell", sma20),
+            # Technical indicators
+            "rsi": float(rsi_val),
+            "macd_line": float(macd_line),
+            "macd_signal": float(macd_sig),
+            "macd_histogram": float(macd_histogram),
+            "bb_position": float(bb_pos),
+            "rsi_overbought": bool(rsi_val > 70),
+            "rsi_oversold": bool(rsi_val < 30),
         }
+
+    # ------------------------------------------------------------------
+    # Technical indicator helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rsi(series: "pd.Series", period: int = 14) -> float:
+        """Relative Strength Index."""
+        if len(series) < period + 1:
+            return 50.0
+        delta = series.diff().dropna()
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1]) if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50.0
+
+    @staticmethod
+    def _macd(series: "pd.Series") -> tuple:
+        """MACD line and signal line."""
+        if len(series) < 26:
+            return 0.0, 0.0
+        ema12 = series.ewm(span=12, adjust=False).mean()
+        ema26 = series.ewm(span=26, adjust=False).mean()
+        line = ema12 - ema26
+        signal = line.ewm(span=9, adjust=False).mean()
+        return float(line.iloc[-1]), float(signal.iloc[-1])
+
+    @staticmethod
+    def _bb_position(series: "pd.Series", period: int = 20) -> float:
+        """Bollinger Band position: 0 = at lower band, 1 = at upper band."""
+        if len(series) < period:
+            return 0.5
+        mid = series.rolling(period).mean()
+        std = series.rolling(period).std()
+        upper = mid + 2 * std
+        lower = mid - 2 * std
+        rng = float((upper - lower).iloc[-1])
+        if rng <= 0:
+            return 0.5
+        return max(0.0, min(1.0, float((series.iloc[-1] - lower.iloc[-1]) / rng)))
 
     def _momentum_strategy_for_backtest(
         self,
@@ -2850,21 +2978,31 @@ class MomentumWorker:
             signal = self._apply_live_order_preferences(signal)
             signal = self._apply_auto_entry_sizing(signal)
 
-            # HTF multi-timeframe confirmation (async)
+            # HTF multi-timeframe confirmation (async) — 15m + 1h
             if self.htf_enabled and side in {"buy", "sell"}:
-                htf_ctx = await self._fetch_htf_context()
-                htf_agrees, htf_trend = self._htf_trend_agrees(side, htf_ctx)
+                htf1_ctx = await self._fetch_htf_context(self.htf_timeframe)
+                htf2_ctx = await self._fetch_htf_context(self.htf2_timeframe)
+                htf1_agrees, htf1_trend = self._htf_trend_agrees(side, htf1_ctx)
+                htf2_agrees, htf2_trend = self._htf_trend_agrees(side, htf2_ctx)
                 signal.setdefault("gate_snapshot", {})
                 if isinstance(signal.get("gate_snapshot"), dict):
-                    signal["gate_snapshot"]["htf_trend"] = htf_trend
-                    signal["gate_snapshot"]["htf_agrees"] = htf_agrees
-                    signal["gate_snapshot"]["htf_timeframe"] = self.htf_timeframe
-                if not htf_agrees:
+                    signal["gate_snapshot"]["htf1_trend"] = htf1_trend
+                    signal["gate_snapshot"]["htf1_agrees"] = htf1_agrees
+                    signal["gate_snapshot"]["htf1_timeframe"] = self.htf_timeframe
+                    signal["gate_snapshot"]["htf2_trend"] = htf2_trend
+                    signal["gate_snapshot"]["htf2_agrees"] = htf2_agrees
+                    signal["gate_snapshot"]["htf2_timeframe"] = self.htf2_timeframe
+                    # Keep legacy key for compatibility
+                    signal["gate_snapshot"]["htf_trend"] = htf1_trend
+                    signal["gate_snapshot"]["htf_agrees"] = htf1_agrees or htf2_agrees
+                    signal["gate_snapshot"]["htf_timeframe"] = f"{self.htf_timeframe}+{self.htf2_timeframe}"
+                # Require at least one HTF to agree
+                if not htf1_agrees and not htf2_agrees:
                     logger.info(
-                        "Skipping signal: HTF (%s) trend disagrees | side=%s htf_trend=%.4f",
-                        self.htf_timeframe, side, htf_trend,
+                        "Skipping signal: both HTFs disagree | side=%s htf1(%s)=%.4f htf2(%s)=%.4f",
+                        side, self.htf_timeframe, htf1_trend, self.htf2_timeframe, htf2_trend,
                     )
-                    self.last_decision_reason = f"entry_gate_failed:htf_trend_{self.htf_timeframe}"
+                    self.last_decision_reason = f"entry_gate_failed:htf_trend_{self.htf_timeframe}+{self.htf2_timeframe}"
                     self.signal_history.append(
                         {
                             "symbol": str(signal.get("symbol", self.symbol)),
