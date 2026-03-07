@@ -855,6 +855,9 @@ class MomentumWorker:
 
         effective_confidence_gate_pct = max(0.0, min(100.0, self.entry_confidence_gate_pct * threshold_mult))
         effective_conviction_gate = max(0.0, min(1.0, self.entry_conviction_gate * threshold_mult))
+        # In low-vol environments, relax conviction proportionally
+        if vol_ann < 0.20:  # annualised vol < 20% → flat/ranging market
+            effective_conviction_gate *= 0.65  # relax by 35%
         effective_pattern_gate = max(0.0, min(1.0, self.entry_pattern_gate * threshold_mult))
         effective_agreement_gate = max(0.0, min(1.0, self.entry_agreement_gate * threshold_mult))
 
