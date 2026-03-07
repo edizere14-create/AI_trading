@@ -298,7 +298,8 @@ def _metric_bar(metrics: Mapping[str, Any]) -> None:
     c1.metric("Total Equity", f"${metrics['total_equity']:,.2f}")
     c2.metric("Daily PnL", f"${metrics['daily_pnl']:,.2f}")
     c3.metric("AI Bias", str(metrics["ai_bias"]))
-    c4.metric("Confidence %", f"{float(metrics['confidence']):.2f}%")
+    _conf = float(metrics.get('confidence') or 0.0)
+    c4.metric("Confidence %", "\u2014 no signal" if _conf <= 5.1 else f"{_conf:.2f}%")
     c5.metric("Risk Exposure %", f"{float(metrics['risk_exposure']):.2f}%")
 
 
@@ -436,7 +437,13 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
             collateral_assets = ["USDT"]
         collateral_total_usd = float(risk_preview.get("collateral_total_usd", 3000.0) or 3000.0)
         confidence_value = ai_display.get("confidence")
-        confidence_text = "N/A" if confidence_value in (None, "") else f"{float(str(confidence_value)):.2f}%"
+        _conf_float = None if confidence_value in (None, "") else float(str(confidence_value))
+        if _conf_float is None:
+            confidence_text = "N/A"
+        elif _conf_float <= 5.1:
+            confidence_text = "\u2014  (no signal)"
+        else:
+            confidence_text = f"{_conf_float:.2f}%"
         vol_forecast_value = ai_display.get("vol_forecast")
         vol_forecast_text = "N/A" if vol_forecast_value in (None, "") else f"{float(str(vol_forecast_value)):.2f}"
         pattern_summary = str(ai_display.get("pattern_summary") or "").strip()

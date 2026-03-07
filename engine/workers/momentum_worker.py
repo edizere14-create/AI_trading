@@ -820,12 +820,19 @@ class MomentumWorker:
         agreement_raw = float(self._signal_agreement_raw())
         agreement_score = abs(agreement_raw)
 
+        # Neutralise confidence contribution when at floor (no real signal)
+        _conf_contribution = (
+            self._clip_score((confidence_pct - 50.0) / 25.0)
+            if confidence_pct > 5.5
+            else 0.0
+        )
+
         composite = (
             0.25 * trend_score_directional
             + 0.20 * momentum_score_directional
             + 0.15 * vol_score
             + 0.10 * (pattern_score if side == "buy" else -pattern_score)
-            + 0.20 * self._clip_score((confidence_pct - 50.0) / 25.0)
+            + 0.20 * _conf_contribution
             + 0.10 * self._clip_score(agreement_raw)
         )
 
@@ -1336,10 +1343,22 @@ class MomentumWorker:
 
         trend_magnitude = abs(trend_pct)
         momentum_magnitude = abs(momentum)
-        direction_agreement = 1.0 if (trend_pct * momentum >= 0) else 0.5
+        direction_agreement = 1.0 if (trend_pct * momentum >= 0) else 0.7
+
+        # Blend: weighted trend/momentum magnitudes + candle body + bar ratios
+        body_strength = max(bullish_body, bearish_body)
+        bar_bias = max(up_ratio, down_ratio)
         confidence_score = min(
             99.0,
-            max(5.0, (trend_magnitude * 10.0 + momentum_magnitude * 15.0) * direction_agreement),
+            max(
+                5.0,
+                (
+                    trend_magnitude * 25.0
+                    + momentum_magnitude * 30.0
+                    + body_strength * 15.0
+                    + bar_bias * 10.0
+                ) * direction_agreement,
+            ),
         )
         composite_long = (
             0.30 * trend_score
