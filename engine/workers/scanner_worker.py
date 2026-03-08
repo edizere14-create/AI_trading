@@ -26,6 +26,10 @@ SCANNER_ENABLED = os.getenv("SCANNER_ENABLED", "false").lower() in {"1", "true",
 
 SCAN_INTERVAL_SEC = float(os.getenv("SCANNER_INTERVAL_SEC", "120"))
 
+CORRELATED_GROUPS = [
+    {"PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_AVAXUSD", "PF_ADAUSD"},
+]
+
 
 class ScannerWorker:
     """
@@ -36,7 +40,7 @@ class ScannerWorker:
     def __init__(self, momentum_worker: Any) -> None:
         self.worker = momentum_worker
         self.running = False
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[Any] | None = None
         self.last_scan_result: dict[str, Any] | None = None
         self.scan_count: int = 0
         logger.info(
@@ -46,14 +50,48 @@ class ScannerWorker:
             SCAN_INTERVAL_SEC,
         )
 
+    def _open_positions_snapshot(self) -> list[dict[str, Any]]:
+        risk_manager = getattr(self.worker, "risk_manager", None)
+        positions = getattr(risk_manager, "positions", {}) if risk_manager is not None else {}
+        if not isinstance(positions, dict) or not positions:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for symbol, payload in positions.items():
+            if isinstance(payload, dict):
+                row = dict(payload)
+                row.setdefault("symbol", str(symbol))
+            else:
+                row = {"symbol": str(symbol)}
+            rows.append(row)
+        return rows
+
+    def _correlation_guard(self, candidate_symbol: str, open_positions: list[dict[str, Any]]) -> bool:
+        """Block entry if we already hold a correlated asset."""
+        open_symbols = {
+            str(p.get("symbol", "")).strip().upper()
+            for p in open_positions
+            if isinstance(p, dict) and str(p.get("symbol", "")).strip()
+        }
+        candidate = str(candidate_symbol or "").strip().upper()
+        for group in CORRELATED_GROUPS:
+            if candidate in group:
+                if open_symbols & group:
+                    return False
+        return True
+
     async def scan(self) -> dict[str, Any] | None:
         """
         Evaluate gate logic for each symbol/side combination.
         Returns the strongest passing signal, or None if nothing qualifies.
         """
         best: dict[str, Any] | None = None
+        open_positions = self._open_positions_snapshot()
 
         for symbol in SCAN_SYMBOLS:
+            if not self._correlation_guard(symbol, open_positions):
+                logger.info("Scanner blocked %s by correlation guard", symbol)
+                continue
             try:
                 candles = await self.worker._load_ohlcv(symbol, "1m", 50)
                 if candles is None or candles.empty:

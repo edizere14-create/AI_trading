@@ -40,6 +40,7 @@ class _FakeStreamlit:
         self.captions: list[str] = []
         self.warnings: list[str] = []
         self.session_state: dict[str, Any] = {}
+        self.sidebar = self
 
     def columns(self, spec: Any):
         count = int(spec) if isinstance(spec, int) else len(spec)
@@ -75,6 +76,12 @@ class _FakeStreamlit:
     def dataframe(self, data: Any, **kwargs: Any) -> None:
         return None
 
+    def selectbox(self, label: str, options: list[str], index: int = 0):
+        if not options:
+            return None
+        safe_index = max(0, min(int(index), len(options) - 1))
+        return options[safe_index]
+
 
 def _load_pages_module():
     asyncpg_stub = sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
@@ -108,7 +115,7 @@ def _seed_dashboard_mocks(monkeypatch, pages, worker_status: dict[str, Any]) -> 
     monkeypatch.setattr(
         pages,
         "get_ai_insight",
-        lambda api_url: {
+        lambda api_url, symbol=None: {
             "bias": "SELL",
             "confidence": 99.0,
             "vol_forecast": 0.20,
@@ -130,7 +137,11 @@ def _seed_dashboard_mocks(monkeypatch, pages, worker_status: dict[str, Any]) -> 
             "volume": [10.0, 9.0, 11.0, 8.0],
         }
     )
-    monkeypatch.setattr(pages, "get_candles", lambda api_url, limit=300: candles)
+    monkeypatch.setattr(
+        pages,
+        "get_candles",
+        lambda api_url, symbol=None, limit=300, timeframe=None: candles,
+    )
     monkeypatch.setattr(pages, "get_worker_status", lambda api_url: worker_status)
 
     monkeypatch.setattr(
@@ -332,3 +343,96 @@ def test_render_dashboard_rerun_replaces_snapshot_confidence(monkeypatch) -> Non
 
     confidence_metrics = [value for label, value in fake_st.metrics if label == "Confidence %"]
     assert confidence_metrics[-2:] == ["11.00%", "66.00%"]
+
+
+def test_render_dashboard_symbol_selector_passes_selected_symbol(monkeypatch) -> None:
+    pages = _load_pages_module()
+    monkeypatch.setenv("SCANNER_SYMBOLS", "PF_ETHUSD,PF_XBTUSD")
+
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(pages, "st", fake_st)
+
+    calls: dict[str, Any] = {}
+    candles = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-03-05T06:00:00Z", periods=4, freq="min"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.5, 101.5, 102.5, 103.5],
+            "volume": [10.0, 11.0, 12.0, 13.0],
+        }
+    )
+
+    monkeypatch.setattr(
+        pages,
+        "get_metrics",
+        lambda api_url: {
+            "total_equity": 5000.0,
+            "daily_pnl": 0.0,
+            "ai_bias": "SELL",
+            "confidence": 99.0,
+            "risk_exposure": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        pages,
+        "get_ai_insight",
+        lambda api_url, symbol=None: {
+            "bias": "SELL",
+            "confidence": 99.0,
+            "vol_forecast": 0.2,
+            "pattern_summary": "test",
+            "why": "test",
+            "signals": [],
+            "_symbol": calls.setdefault("ai_symbol", symbol),
+        },
+    )
+    monkeypatch.setattr(pages, "get_active_trades", lambda api_url: pd.DataFrame())
+    monkeypatch.setattr(pages, "get_open_orders", lambda api_url: pd.DataFrame())
+    monkeypatch.setattr(
+        pages,
+        "get_candles",
+        lambda api_url, symbol=None, limit=300, timeframe=None: (
+            calls.setdefault("candles_symbol", symbol),
+            candles,
+        )[1],
+    )
+    monkeypatch.setattr(
+        pages,
+        "get_worker_status",
+        lambda api_url: {"is_running": False, "signal_count": 0, "execution_count": 0},
+    )
+    monkeypatch.setattr(
+        pages,
+        "_build_trade_reasoning",
+        lambda ai, candles, confidence_threshold=55.0, conviction_threshold=0.35, agreement_threshold=0.30: {
+            "go_nogo": "NO-GO",
+            "go_nogo_reason": "test",
+            "headline": "test",
+            "actions": [],
+            "gates": [],
+            "factors": pd.DataFrame(),
+            "composite": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        pages,
+        "get_risk_preview",
+        lambda api_url, payload: {
+            "collateral_bucket_exposure_pct": 0.10,
+            "collateral_bucket_limit_pct": 0.60,
+            "trade_collateral_asset": "BTC",
+        },
+    )
+    monkeypatch.setattr(pages, "_chart", lambda df, ai, live_price: None)
+    monkeypatch.setattr(pages, "render_execution_debug", lambda signal: None)
+
+    stream = SimpleNamespace(
+        latest=SimpleNamespace(price=2010.0, ts="2026-03-05T06:00:00+00:00")
+    )
+    pages.render_dashboard("http://localhost:8000", stream, risk_preview={})
+
+    assert calls["ai_symbol"] == "PF_ETHUSD"
+    assert calls["candles_symbol"] == "PF_ETHUSD"
+    assert any("PF_ETHUSD" in line for line in fake_st.captions)

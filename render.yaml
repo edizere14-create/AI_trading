@@ -24,6 +24,14 @@ services:
         value: PI_XBTUSD
       - key: MOMENTUM_AUTO_START
         value: true
+      - key: MAX_CONTRACTS_HARD_LIMIT
+        value: 15
+      - key: MOMENTUM_ENTRY_AUTO_SIZE_MAX_QTY
+        value: 0.05
+      - key: MAX_OPEN_POSITIONS
+        value: 3
+      - key: SCANNER_SYMBOLS
+        value: PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_AVAXUSD,PF_ADAUSD
       - key: KRAKEN_API_KEY
         sync: false
       - key: KRAKEN_API_SECRET
@@ -54,6 +62,8 @@ services:
         value: wss://ai-trading-engd.onrender.com/ws/price
       - key: STREAMLIT_APP_MODE
         value: backend-api
+      - key: SCANNER_SYMBOLS
+        value: PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_AVAXUSD,PF_ADAUSD
       - key: DASHBOARD_AUTH_ENABLED
         value: true
       - key: DASHBOARD_AUTH_USERNAME

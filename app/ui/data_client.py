@@ -142,6 +142,27 @@ def _normalize_futures_symbol(symbol: str) -> str:
     return value
 
 
+def _to_kraken_symbol(symbol: str | None) -> str:
+    if symbol in (None, ""):
+        return _kraken_symbol()
+
+    raw = str(symbol).strip()
+    normalized = _normalize_futures_symbol(raw)
+    mapping = {
+        "PF_XBTUSD": "BTC/USD:USD",
+        "PF_ETHUSD": "ETH/USD:USD",
+        "PF_SOLUSD": "SOL/USD:USD",
+        "PF_AVAXUSD": "AVAX/USD:USD",
+        "PF_ADAUSD": "ADA/USD:USD",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+
+    if "/" in raw:
+        return raw
+    return _kraken_symbol()
+
+
 def _coerce_candles_payload(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         candidate = payload.get("candles", payload.get("result", payload.get("data", payload)))
@@ -544,12 +565,12 @@ def get_metrics(api_url: str) -> dict[str, Any]:
     }
 
 
-def get_ai_insight(api_url: str) -> dict[str, Any]:
+def get_ai_insight(api_url: str, symbol: str | None = None) -> dict[str, Any]:
     if _all_in_one_enabled(api_url):
-        symbol = _kraken_symbol()
+        requested_symbol = _to_kraken_symbol(symbol)
         exchange = _build_exchange()
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=120)
+            ohlcv = exchange.fetch_ohlcv(requested_symbol, timeframe="1m", limit=120)
         except Exception as exc:
             raise _format_kraken_exchange_error("fetch Kraken candles", exc) from exc
         if len(ohlcv) < 30:
@@ -582,7 +603,10 @@ def get_ai_insight(api_url: str) -> dict[str, Any]:
         }
 
     try:
-        data = _get_json(f"{api_url}/momentum/analytics")
+        requested_symbol = _normalize_futures_symbol(
+            str(symbol or os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PF_XBTUSD"))
+        )
+        data = _get_json(f"{api_url}/momentum/analytics", params={"symbol": requested_symbol})
     except ApiContractError:
         return _analytics_fallback()
 
@@ -825,13 +849,18 @@ def get_open_orders(api_url: str, limit: int = 100) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_candles(api_url: str, limit: int = 300, timeframe: str | None = None) -> pd.DataFrame:
+def get_candles(
+    api_url: str,
+    symbol: str | None = None,
+    limit: int = 300,
+    timeframe: str | None = None,
+) -> pd.DataFrame:
     chart_tf = timeframe or os.getenv("CHART_TIMEFRAME", "5m")
     if _all_in_one_enabled(api_url):
         exchange = _build_exchange()
-        symbol = _kraken_symbol()
+        requested_symbol = _to_kraken_symbol(symbol)
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe=chart_tf, limit=max(50, int(limit)))
+            ohlcv = exchange.fetch_ohlcv(requested_symbol, timeframe=chart_tf, limit=max(50, int(limit)))
         except Exception as exc:
             raise _format_kraken_exchange_error("fetch Kraken candles", exc) from exc
         rows = [
@@ -847,7 +876,9 @@ def get_candles(api_url: str, limit: int = 300, timeframe: str | None = None) ->
         ]
         return pd.DataFrame(rows).tail(limit)
 
-    requested_symbol = _normalize_futures_symbol(os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PF_XBTUSD"))
+    requested_symbol = _normalize_futures_symbol(
+        str(symbol or os.getenv("MOMENTUM_DEFAULT_SYMBOL", "PF_XBTUSD"))
+    )
     candle_payload: Any = None
     errors: list[str] = []
     endpoints = [

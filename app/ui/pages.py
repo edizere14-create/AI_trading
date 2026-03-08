@@ -360,11 +360,20 @@ def _chart(df: pd.DataFrame, ai: Mapping[str, Any], live_price: float) -> None:
 
 
 def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[str, Any] | None = None) -> None:
+    symbols = [
+        s.strip()
+        for s in os.getenv("SCANNER_SYMBOLS", "PF_XBTUSD").split(",")
+        if s.strip()
+    ]
+    if not symbols:
+        symbols = ["PF_XBTUSD"]
+    selected = st.sidebar.selectbox("Chart Symbol", symbols, index=0)
+
     try:
         metrics = get_metrics(api_url)
-        ai = get_ai_insight(api_url)
+        ai = get_ai_insight(api_url, symbol=selected)
         trades = get_active_trades(api_url)
-        candles = get_candles(api_url, limit=300)
+        candles = get_candles(api_url, symbol=selected, limit=300)
     except ApiContractError as e:
         st.error(f"Dashboard data load failed: {e}")
         st.info("Switch to Backend API mode, or verify All-in-One credentials/connectivity.")
@@ -417,13 +426,13 @@ def render_dashboard(api_url: str, stream: PriceStream, risk_preview: Mapping[st
 
     with left:
         st.subheader("Main Chart")
-        st.caption(f"Live Price: ${stream.latest.price:,.2f} • {stream.latest.ts}")
+        st.caption(f"{selected} • Live Price: ${stream.latest.price:,.2f} • {stream.latest.ts}")
         _chart(candles, ai_display, stream.latest.price)
 
     with mid:
         st.subheader("AI Insight Panel")
         risk_preview = risk_preview or {}
-        configured_symbol = str(risk_preview.get("symbol", "PF_XBTUSD") or "PF_XBTUSD").strip().upper()
+        configured_symbol = str(risk_preview.get("symbol", selected) or selected).strip().upper()
         if configured_symbol.startswith("PI_"):
             configured_symbol = configured_symbol.replace("PI_", "PF_", 1)
         preview_symbol = configured_symbol if configured_symbol else "PF_XBTUSD"

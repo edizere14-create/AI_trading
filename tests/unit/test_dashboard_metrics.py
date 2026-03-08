@@ -233,3 +233,81 @@ def test_portfolio_computes_weight_pct_from_active_trades(monkeypatch) -> None:
     weights = pf.set_index("symbol")["weight_pct"].to_dict()
     assert weights["A"] == 25.0
     assert weights["B"] == 75.0
+
+
+def test_get_ai_insight_forwards_selected_symbol_to_analytics(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_get_json(url: str, params=None):
+        seen["url"] = url
+        seen["params"] = params
+        return {
+            "bias": "BUY",
+            "confidence": 70.0,
+            "volatility_forecast": 0.2,
+            "pattern_summary": "ok",
+            "why": "test",
+            "signals": [],
+        }
+
+    monkeypatch.setattr(data_client, "_all_in_one_enabled", lambda _: False)
+    monkeypatch.setattr(data_client, "_get_json", _fake_get_json)
+
+    result = data_client.get_ai_insight("http://127.0.0.1:8000", symbol="PI_ETHUSD")
+
+    assert result["bias"] == "BUY"
+    assert str(seen["url"]).endswith("/momentum/analytics")
+    assert seen["params"] == {"symbol": "PF_ETHUSD"}
+
+
+def test_get_candles_forwards_selected_symbol_to_backend_ohlcv(monkeypatch) -> None:
+    seen_calls: list[tuple[str, dict[str, object] | None]] = []
+
+    def _fake_get_json(url: str, params=None):
+        seen_calls.append((url, params))
+        if url.endswith("/data/kraken/ohlcv"):
+            return {
+                "candles": [
+                    {
+                        "timestamp": "2026-03-05T06:00:00Z",
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.5,
+                        "volume": 10.0,
+                    },
+                    {
+                        "timestamp": "2026-03-05T06:01:00Z",
+                        "open": 100.5,
+                        "high": 101.2,
+                        "low": 100.1,
+                        "close": 100.9,
+                        "volume": 11.0,
+                    },
+                ]
+            }
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(data_client, "_all_in_one_enabled", lambda _: False)
+    monkeypatch.setattr(data_client, "_get_json", _fake_get_json)
+
+    df = data_client.get_candles(
+        "http://127.0.0.1:8000",
+        symbol="PI_SOLUSD",
+        limit=2,
+        timeframe="1m",
+    )
+
+    assert not df.empty
+    assert len(seen_calls) >= 1
+    first_url, first_params = seen_calls[0]
+    assert first_url.endswith("/data/kraken/ohlcv")
+    assert first_params == {"symbol": "PF_SOLUSD", "timeframe": "1m", "limit": 50}
+
+
+def test_to_kraken_symbol_mapping_coverage() -> None:
+    assert data_client._to_kraken_symbol("PF_XBTUSD") == "BTC/USD:USD"
+    assert data_client._to_kraken_symbol("PF_ETHUSD") == "ETH/USD:USD"
+    assert data_client._to_kraken_symbol("PF_SOLUSD") == "SOL/USD:USD"
+    assert data_client._to_kraken_symbol("PF_AVAXUSD") == "AVAX/USD:USD"
+    assert data_client._to_kraken_symbol("PF_ADAUSD") == "ADA/USD:USD"

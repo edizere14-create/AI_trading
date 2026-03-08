@@ -82,7 +82,14 @@ class RiskManager:
         self.max_position_pct = float(max_position_pct)
         self.max_daily_loss_pct = float(max_daily_loss_pct)
         self.max_drawdown_pct = float(max_drawdown_pct)
-        self.max_concurrent_positions = int(max_concurrent_positions)
+        env_default_max_positions = str(max_concurrent_positions)
+        try:
+            self.max_concurrent_positions = max(
+                1,
+                int(os.getenv("MAX_OPEN_POSITIONS", env_default_max_positions) or env_default_max_positions),
+            )
+        except (TypeError, ValueError):
+            self.max_concurrent_positions = max(1, int(max_concurrent_positions))
         self.daily_profit_target = float(daily_profit_target_pct)
         self.daily_loss_limit = float(self.max_daily_loss_pct)
         if max_leverage_ratio is None:
