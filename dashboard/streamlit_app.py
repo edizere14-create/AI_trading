@@ -479,6 +479,12 @@ else:
 default_mode = os.getenv("STREAMLIT_APP_MODE", "backend-api").strip().lower()
 env_is_production = os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
 is_production = env_is_production or ("onrender.com" in default_api_url.lower())
+allow_all_in_one_in_production = os.getenv("ALLOW_ALL_IN_ONE_IN_PRODUCTION", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 all_in_one_modes = {"all-in-one", "all_in_one", "direct", "standalone"}
 backend_api_modes = {"backend-api", "backend_api", "api", "backend"}
 if default_mode in all_in_one_modes:
@@ -489,8 +495,11 @@ else:
     mode_index = 0
 mode = st.sidebar.radio("App Mode", ["All-in-One", "Backend API"], index=mode_index)
 
-if is_production and mode == "All-in-One":
-    st.sidebar.warning("All-in-One is disabled in production for safety. Using Backend API mode.")
+if is_production and mode == "All-in-One" and not allow_all_in_one_in_production:
+    st.sidebar.warning(
+        "All-in-One is disabled in production unless ALLOW_ALL_IN_ONE_IN_PRODUCTION=true. "
+        "Using Backend API mode."
+    )
     mode = "Backend API"
 
 
